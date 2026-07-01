@@ -1,0 +1,6 @@
+firmware/.pio/
+companion-app/__pycache__/
+companion-app/.venv/
+companion-app/*.pyc
+Thumbs.db
+.DS_Store
