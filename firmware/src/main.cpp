@@ -6,34 +6,42 @@ TFT_eSPI tft = TFT_eSPI();
 
 uint16_t calData[5] = { 230, 3539, 255, 3493, 5 };
 
+int size = 120;
+int gap = 20;
+int startX = 40;
+int startY = 40;
+int maxRows = 2;
+int maxColumns = 3;
+
 void setup() {
   tft.setTouch(calData);
   Serial.begin(115200);
   tft.init();
   tft.setRotation(1);              // 1 = landscape (480 wide, 320 tall)
   tft.fillScreen(TFT_BLACK);       // wipe whole screen to one color
-
-
   
 
-  int size = 120;
-  int gap = 20;
-  int startX = 40;
-  int startY = 40;
-  
-
-  for(int row = 0; row < 2; row++){
-    for(int col = 0; col < 3; col++){
-      int x = startX + col * (size + gap);
-      int y = startY + row * (size + gap);
+  for(int currentRow = 0; currentRow < maxRows; currentRow++){
+    for(int currentColumn = 0; currentColumn < maxColumns; currentColumn++){
+      int x = startX + currentColumn * (size + gap);
+      int y = startY + currentRow * (size + gap);
       tft.fillRect(x, y, size, size, TFT_BLUE);
     }
   }
 }
 
 void whichButton(uint16_t touchX, uint16_t touchY){
-  if(touchX >= 40 && touchX <= 160 && touchY >= 40 && touchY <= 160){
-    Serial.println("top left touched");
+  for(int currentRow = 0; currentRow < maxRows; currentRow++){
+    for(int currentColumn = 0; currentColumn < maxColumns; currentColumn++){
+      int x = startX + currentColumn * (size + gap);
+      int y = startY + currentRow * (size + gap);
+
+      if(touchX >= x && touchX <= x + size && touchY >= y && touchY <= y + size){
+        int buttonNumber = currentRow * maxColumns + currentColumn + 1;
+        Serial.print("BTN:");
+        Serial.println(buttonNumber);
+      }
+    }
   }
 }
 
