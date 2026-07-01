@@ -1,18 +1,69 @@
 #include <Arduino.h>
+#include <SPI.h>
+#include <TFT_eSPI.h>
 
-// put function declarations here:
-int myFunction(int, int);
+TFT_eSPI tft = TFT_eSPI();
+
+uint16_t calData[5] = { 230, 3539, 255, 3493, 5 };
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+  tft.setTouch(calData);
+  Serial.begin(115200);
+  tft.init();
+  tft.setRotation(1);              // 1 = landscape (480 wide, 320 tall)
+  tft.fillScreen(TFT_BLACK);       // wipe whole screen to one color
+
+
+  
+
+  int size = 120;
+  int gap = 20;
+  int startX = 40;
+  int startY = 40;
+  
+
+  for(int row = 0; row < 2; row++){
+    for(int col = 0; col < 3; col++){
+      int x = startX + col * (size + gap);
+      int y = startY + row * (size + gap);
+      tft.fillRect(x, y, size, size, TFT_BLUE);
+    }
+  }
+}
+
+void whichButton(uint16_t touchX, uint16_t touchY){
+  if(touchX >= 40 && touchX <= 160 && touchY >= 40 && touchY <= 160){
+    Serial.println("top left touched");
+  }
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  uint16_t touchX, touchY;
+  if(tft.getTouch(&touchX, &touchY)) {
+    whichButton(touchX, touchY);
+  }
 }
 
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
-}
+//   // --- DRAWING SHAPES ---
+//   // All coordinates are (x, y) from top-left corner. x = across, y = down.
+
+//   tft.drawRect(10, 10, 100, 60, TFT_WHITE);        // outline rectangle: x, y, width, height, color
+//   tft.fillRect(10, 80, 100, 60, TFT_BLUE);         // filled rectangle
+//   tft.drawRoundRect(10, 150, 100, 60, 10, TFT_GREEN); // rounded outline: ...,corner radius, color
+//   tft.fillRoundRect(120, 10, 100, 60, 10, TFT_RED);   // filled rounded
+
+//   tft.drawCircle(170, 130, 30, TFT_YELLOW);        // outline circle: center x, center y, radius, color
+//   tft.fillCircle(170, 200, 30, TFT_CYAN);          // filled circle
+
+//   tft.drawLine(250, 10, 400, 100, TFT_MAGENTA);    // line: x1, y1, x2, y2, color
+
+//   // --- TEXT ---
+//   tft.setTextColor(TFT_WHITE, TFT_BLACK);  // text color, background color
+//   tft.setTextSize(2);                      // size multiplier (1 = smallest)
+//   tft.setCursor(250, 150);                 // where text starts (x, y)
+//   tft.print("Hello!");                     // print text at cursor
+
+//   tft.setTextSize(3);
+//   tft.setCursor(250, 200);
+//   tft.print(42);                           // can print numbers too
+// }
