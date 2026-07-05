@@ -147,6 +147,20 @@ This section is important for the portfolio reflection — it documents real deb
 - After the DRAM fix, first successful flash showed a plain white screen with backlight on, no visible content.
 - **Correctly self-diagnosed in session:** LVGL's default screen background is white, and no widgets had been created yet — a white screen with backlight on is exactly the expected state before any `lv_obj` is created, not a display/wiring fault.
 
+### 4.15 Runtime style changes (from `loop()`) silently didn't redraw — real LVGL bug, methodically isolated
+- While experimenting with a touch-triggered background color change (`lv_obj_set_style_bg_color(lv_screen_active(), ..., 0)` called from inside `loop()`), the color visually never changed, despite the surrounding code running correctly (confirmed via `Serial.println` firing exactly as expected).
+- **False leads ruled out first, in order, each with a real test:**
+  - Suspected the artificial `delay(100)` test slowdown (added for an earlier, unrelated "watch LVGL redraw in visible slices" experiment) was causing a watchdog reset — ruled out by re-testing the known-good button-only version with the same delay still present; it rendered fine.
+  - Suspected the `static bool toggled` one-shot guard was somehow blocking rendering — logically ruled out (a bool that's only read *after* a touch cannot affect boot-time rendering) and empirically ruled out (re-flashing the identical "step 1" print-only version, then the `toggled` version, both worked — the one earlier "nothing rendered" run was a one-off, most likely a marginal jumper-wire contact given this board's wiring history, not a code fault).
+  - Discovered mid-investigation that a test string ("changing color") was printing without actually being paired with the real `lv_obj_set_style_bg_color` call — an artifact of incrementally stripping code down during isolation, not a bug, but a good reminder to check what a diagnostic print is actually next to, not just its text.
+  - Found and fixed a **real, separate bug** in one intermediate version: `lv_button_create(...)` had accidentally ended up called from inside `loop()` instead of `setup()`, recreating a brand-new button object on every single loop iteration (hundreds of times per second) — masking any color change since a fresh orange button was redrawn on top immediately after. Fixed by promoting `lv_obj_t *btn` to a global and creating it exactly once, in `setup()`, per the same pattern already used for other cross-function variables (`size`, `gap`, etc., see section 8).
+- **After that fix, the color change still silently failed to redraw** — isolated further by adding a `Serial.printf` inside `my_disp_flush` itself, confirming the full 16-slice boot-time render produced flush calls as expected, but **zero new flush calls occurred after the touch-triggered style change**, even though the style-setter call itself definitely ran.
+- Tried `lv_obj_invalidate(lv_screen_active())` after the style change as a forced "mark this dirty" call — still no effect, no new flushes.
+- **Actual fix:** added `lv_refr_now(disp)` immediately after the style change, which forces LVGL to run an immediate synchronous refresh cycle rather than waiting for its normal periodic scheduling (driven by repeated `lv_timer_handler()` calls in `loop()`). This **did** trigger new flushes and the background genuinely changed color. Required promoting `lv_display_t *disp` to a global (same pattern as `btn`) so `loop()` could reach it.
+- **Follow-up test showed `lv_obj_invalidate` was unnecessary** — `lv_refr_now(disp)` alone, with no explicit invalidate call, was sufficient to trigger the redraw. Root cause of *why* the normal periodic refresh doesn't pick up runtime style changes reliably on its own was not conclusively identified (possibly an LVGL 9.5-specific scheduling quirk, possibly an interaction with the tight `lv_timer_handler(); delay(5);` loop structure) — not resolved, just reliably worked around.
+- **Established going-forward rule:** any style/property change made from `loop()` (i.e. after initial setup-time creation) should be followed by `lv_refr_now(disp)` to guarantee the change is actually visible immediately, rather than assuming LVGL's automatic refresh will pick it up on its own schedule.
+- Diagnostic scaffolding (delay, heartbeat prints, flush-logging, pointer-comparison prints) was stripped back out afterward, keeping only the `disp`/`btn` global promotions and a short code comment flagging the `lv_refr_now` requirement for future reference.
+
 ---
 
 ## 5. Toolchain Migration: Arduino IDE → PlatformIO
@@ -225,9 +239,9 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 2 | Touch bring-up + calibration | ✅ Done (calData captured above) |
 | 3a | **Manual** button grid + manual coordinate hit-testing (deliberately done before LVGL, for learning) | ✅ Done |
 | 3b | Generalize manual hit-test to all buttons in the grid (loop over all rows/cols) | ✅ Done — `whichButton()` generalized with nested `for(currentRow)/for(currentColumn)` loop, prints `BTN:1`–`BTN:6` using formula `currentRow * maxColumns + currentColumn + 1` |
-| 3c | LVGL setup (replaces manual drawing/hit-testing with a real UI library) | 🟡 **In progress** — library installed, config wired, display flush + touch read callbacks working, DRAM overflow fixed, first widget (single button + label) rendering and confirmed on screen |
+| 3c | LVGL setup (replaces manual drawing/hit-testing with a real UI library) | ✅ Done — library installed, config wired, display flush + touch read callbacks working, DRAM overflow fixed, single button + label rendering and confirmed on screen |
 | 3d | LVGL: generalize to full 6-button grid using LVGL widgets | ⏳ **Next immediate step** |
-| 3e | LVGL: styling (background/button colors) | 🟡 Started — background color and button color style calls introduced (`lv_obj_set_style_bg_color`), not yet applied across the full grid |
+| 3e | LVGL: styling (background/button colors) | 🟡 Started — background color and button color style confirmed working, including runtime changes from `loop()` (see 4.15) once paired with `lv_refr_now(disp)`; not yet applied across a full grid |
 | 4 | USB HID | ❌ **Dropped as a requirement** — companion app handles keystroke simulation instead (see section 2) |
 | 5 | Wire button grid → serial (`BTN:n` messages) | 🟡 Partially done — manual hit-test version (3b) prints `BTN:n` correctly; needs porting to the LVGL version once 3d is done (LVGL button click events will replace polling `whichButton()`), and needs the PC side built |
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
@@ -301,7 +315,7 @@ void loop() {
 }
 ```
 
-**Current LVGL bring-up version (in progress — single button confirmed working on hardware):**
+**Current LVGL bring-up version (cleaned up after the section 4.15 refresh-bug debugging — single button confirmed working on hardware, including runtime style changes):**
 ```cpp
 #include <Arduino.h>
 #include <SPI.h>
@@ -312,6 +326,9 @@ TFT_eSPI tft = TFT_eSPI();
 
 static const uint16_t screenWidth = 480;
 static const uint16_t screenHeight = 320;
+
+lv_obj_t *btn;
+lv_display_t *disp; // global — needed to force a manual refresh from loop(), see note below
 
 // Partial line-buffer, not a full-screen buffer — a full screen's worth of
 // pixels doesn't fit in available RAM alongside everything else LVGL/Arduino
@@ -354,7 +371,7 @@ void setup() {
 
   lv_init();
 
-  lv_display_t *disp = lv_display_create(screenWidth, screenHeight);
+  disp = lv_display_create(screenWidth, screenHeight);
   lv_display_set_flush_cb(disp, my_disp_flush);
   lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
@@ -362,9 +379,9 @@ void setup() {
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, my_touch_read);
 
-  lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x1E1E1E), 0);
-
-  lv_obj_t *btn = lv_button_create(lv_screen_active());
+  // button — created ONCE here, never in loop() (see section 4.15 for what
+  // happens if this ends up in loop() by accident: a fresh button every ~5ms)
+  btn = lv_button_create(lv_screen_active());
   lv_obj_set_size(btn, 120, 120);
   lv_obj_set_pos(btn, 40, 40);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0xFF6B00), 0);
@@ -376,10 +393,15 @@ void setup() {
 void loop() {
   lv_timer_handler();
   delay(5);
+
+  // NOTE: any style/property change made here (from loop(), after initial
+  // setup-time creation) needs lv_refr_now(disp) right after it, or the
+  // change silently won't render — LVGL's normal periodic refresh didn't
+  // reliably pick up runtime style changes during testing (section 4.15).
 }
 ```
 
-Confirmed on hardware: dark background, one orange 120×120 button at (40,40) with white "1" label, correctly rendered via the flush/touch callback pipeline. Not yet generalized to all 6 buttons (3d, next step).
+Confirmed on hardware: one orange 120×120 button at (40,40) with white "1" label, correctly rendered via the flush/touch callback pipeline, and confirmed that runtime style changes (background/button color, triggered by touch from `loop()`) work correctly when paired with `lv_refr_now(disp)`. Not yet generalized to all 6 buttons (3d, next step).
 
 ---
 
@@ -397,6 +419,8 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - The student **independently and correctly diagnosed** a blank/white LVGL screen as expected default behavior (no widgets created yet) rather than assuming something was broken — a good sign of the mental model forming correctly.
 - The student also correctly linked a COM-port-busy error to a leftover serial monitor session before being told the cause, applying troubleshooting instincts from earlier hardware/tooling debugging (section 4) to a new tooling issue.
 - Asked a good clarifying question about whether shrinking LVGL's memory (to fix the DRAM overflow) would limit future UI complexity — showed active tracking of downstream consequences of a proposed fix rather than just accepting it, and prompted a clear distinction between "safe to shrink" (a reusable buffer) vs. "will bite you later" (the runtime widget memory pool).
+- Explicitly paused mid-implementation to ask "is LVGL really the best way to do this?" rather than just continuing on inertia once real friction (memory tuning, new syntax) showed up — a good habit of periodically re-justifying a tool choice against the actual project scope rather than sunk-cost continuing. Confirmed LVGL was the right call once the actual scope ("infinite" nested menus) was stated explicitly, since that's precisely the class of problem LVGL's screen/object model solves and hand-rolling would solve badly.
+- The section 4.15 refresh-bug investigation was a genuine, non-trivial debugging session (not a simple typo) — worth highlighting for the portfolio reflection specifically because the student pushed back on a plausible-but-wrong first fix (rejecting "it just glitched" as an explanation) and insisted on isolating the real cause via a structured process: bisecting between known-working and known-broken versions, adding targeted instrumentation (heartbeat prints, flush-call logging, pointer comparisons) rather than guessing repeatedly, and correctly noticing when a diagnostic print's *text* had drifted from what the code *actually* did after incremental edits. This is a strong, concrete example of real debugging methodology for the eventual portfolio reflection, distinct from hardware debugging (section 4) — this time entirely in software/library behavior.
 
 ---
 
@@ -422,9 +446,11 @@ Derived from reviewing the student's own APDS-9960 sensor library (a separate pr
 
 *(as of this log update)*
 
-1. Generalize the current single-button LVGL code into the full 6-button grid: loop over `currentRow`/`currentColumn` (same math as sections 3b/8) and call `lv_button_create` + `lv_label_create` once per button instead of once total. Figure out where per-button click handling will hook in (LVGL event callbacks, e.g. `lv_obj_add_event_cb`) to eventually replace the manual `whichButton()` polling loop.
-2. Once the 6-button LVGL grid renders and is stylistically settled (colors applied consistently, not just on button #1), revisit whether `whichButton()`/manual hit-testing code should be removed from `main.cpp` entirely now that LVGL owns touch handling, or kept commented for reference.
-3. Wire LVGL button click events to print `BTN:1`–`BTN:6` over serial (replacing the old `Serial.println` calls in the manual `whichButton()`), completing roadmap item 5 for the LVGL version.
-4. Start scaffolding the Python companion app (`companion-app/`) — begin with `spotipy` working standalone in a terminal (no ESP32 involved) before wiring it to serial.
-5. Consider testing the ESP32-S2 mini again at some point out of curiosity (not urgent, no longer blocking anything) — possibly with a multimeter check of VBUS/GND voltage, which was never actually done.
-6. Apply the new comment-style conventions (section 10) retroactively to `main.cpp` if/when convenient — not urgent, but worth doing before the file grows much larger.
+1. Generalize the current single-button LVGL code into the full 6-button grid: loop over `currentRow`/`currentColumn` (same math as sections 3b/8) and call `lv_button_create` + `lv_label_create` once per button instead of once total, converting the numeric button number to a string for the label (e.g. via `snprintf`) — this conversion step was flagged but not yet written. Figure out where per-button click handling will hook in (LVGL event callbacks, e.g. `lv_obj_add_event_cb`) to eventually replace the manual `whichButton()` polling loop.
+2. Keep the section 4.15 lesson in mind while building the grid: any button color/state change triggered at runtime (e.g. a pressed/active visual state) needs `lv_refr_now(disp)` right after the style call, or it may silently not render.
+3. Once the 6-button LVGL grid renders and is stylistically settled (colors applied consistently, not just on button #1), revisit whether `whichButton()`/manual hit-testing code should be removed from `main.cpp` entirely now that LVGL owns touch handling, or kept commented for reference.
+4. Wire LVGL button click events to print `BTN:1`–`BTN:6` over serial (replacing the old `Serial.println` calls in the manual `whichButton()`), completing roadmap item 5 for the LVGL version.
+5. Now that "infinite" nested menus are the confirmed target (section 9), sketch the intended menu structure (how many levels deep, rough total menu count) before wiring navigation — planned so the 6-button loop isn't rebuilt once multi-screen navigation (`lv_screen_create`/`lv_screen_load`) gets layered in.
+6. Start scaffolding the Python companion app (`companion-app/`) — begin with `spotipy` working standalone in a terminal (no ESP32 involved) before wiring it to serial.
+7. Consider testing the ESP32-S2 mini again at some point out of curiosity (not urgent, no longer blocking anything) — possibly with a multimeter check of VBUS/GND voltage, which was never actually done.
+8. Apply the comment-style conventions (section 10) retroactively to `main.cpp` if/when convenient — not urgent, but worth doing before the file grows much larger.
