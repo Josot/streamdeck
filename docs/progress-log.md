@@ -26,10 +26,29 @@ Two architectures were considered:
 
 **This last point was a major realization mid-project**: since the PC app can simulate keypresses itself, the microcontroller's USB HID capability became irrelevant. This eliminated the need for a USB-OTG-capable chip (ESP32-S2/S3) and let us fall back to using the plain classic ESP32 we already had proven working, rather than debugging an unknown/possibly-dead S2 mini.
 
-**Serial protocol (planned):** simple line-based text over USB serial.
+**Serial protocol (original plan, superseded — see v2 below):** simple line-based text over USB serial.
 - ESP32 → PC: `BTN:7` (button press events)
 - PC → ESP32: `TRACK:...`, `SCENE:...`, `MUTE:1` (status pushes, for showing now-playing track / highlighting active OBS scene / mic-mute indicator on screen)
 - OBS pushes events instantly (websocket). Spotify has no push mechanism — PC app must poll `currently-playing` periodically (a few seconds' lag is fine and expected).
+
+### 2.1 Serial protocol v2 (26-7-2026) — actions, not button numbers
+
+Decided during the multi-page firmware build, superseding the `BTN:n` plan: buttons send **semantic action strings**, not positions. One line per press:
+
+```
+SPOTIFY:NEXT
+KEY:CTRL+C
+OBS:SCENE:1
+DISCORD:MUTE
+```
+
+**Reasoning:** `BTN:3` becomes meaningless once buttons live on different pages of a multi-page UI. With action strings, the Python app just splits on `:` and dispatches — it never knows or cares about pages, grid positions, or layout. The UI can be rearranged freely without touching the Python side, and vice versa. Navigation presses (category buttons, back/prev/next) send nothing over serial; they're purely local.
+
+**This is the contract the companion app builds against.** The PC→ESP32 direction (status pushes) is unchanged from the original plan and still not implemented.
+
+### 2.2 UI architecture: data-driven pages (26-7-2026)
+
+The multi-page UI is generated from `const` data tables, not written as code-per-screen — one generic `buildPage()` function turns a `PageDef` into a full LVGL screen. Rejected alternative: a hand-written create-function per screen (7+ near-identical functions, doesn't scale to the "infinite nested menus" target). Details of the structure live in section 8; the reasoning is: adding a page must be a data edit, not new layout code.
 
 ---
 
@@ -161,6 +180,31 @@ This section is important for the portfolio reflection — it documents real deb
 - **Established going-forward rule:** any style/property change made from `loop()` (i.e. after initial setup-time creation) should be followed by `lv_refr_now(disp)` to guarantee the change is actually visible immediately, rather than assuming LVGL's automatic refresh will pick it up on its own schedule.
 - Diagnostic scaffolding (delay, heartbeat prints, flush-logging, pointer-comparison prints) was stripped back out afterward, keeping only the `disp`/`btn` global promotions and a short code comment flagging the `lv_refr_now` requirement for future reference.
 
+> **Addendum 26-7-2026 — ROOT CAUSE FOUND, see 4.16.** The mystery is solved: LVGL's tick counter was never being advanced (`lv_tick_inc()` was missing entirely), so LVGL's periodic refresh timer never fired — "possibly a scheduling quirk" was in fact a starved clock. The `lv_refr_now()` workaround treated the symptom. It is now **obsolete and removed from the code**; the going-forward rule above no longer applies. Runtime style changes render on their own since the tick fix (verified on hardware via pressed-state button colors).
+
+### 4.16 Touch completely dead on first multi-page build — LVGL's clock was never running (26-7-2026)
+- **Symptom:** new multi-page firmware (see section 8) flashed cleanly and the UI drew correctly, but touching category buttons did nothing. No navigation at all.
+- **Key realization before touching anything:** LVGL's touch pipeline had *never actually been tested*. In the old single-button code, the visible on-touch color change came from the manual `tft.getTouch()` block in `loop()` — not from LVGL. `my_touch_read` was registered but nothing had ever proven LVGL called it. So this wasn't "touch broke" — it was the LVGL input path failing its very first real test.
+- **Method:** same bisect-with-instrumentation approach as 4.15. Added a once-per-second heartbeat print inside `my_touch_read` plus a coordinate print on detected touches, with three possible outcomes mapped in advance to three different culprits (LVGL never polls / `getTouch` returns nothing / coordinates rotated vs. calibration).
+- **Result: total silence.** Not even the heartbeat printed. LVGL never called the read callback once.
+- **Root cause:** LVGL does not track time by itself on Arduino. Everything periodic inside it (input polling, screen refresh, animations) runs on internal timers that measure elapsed time via a tick counter — and that counter only advances when the application calls `lv_tick_inc()`. Nothing in the code ever did. Every LVGL timer saw "0 ms have passed" forever and never fired. The UI still drew at boot because the first render doesn't depend on those timers; everything periodic after that was dead.
+- **Fix:** one line in `loop()`:
+  ```cpp
+  void loop() {
+    lv_timer_handler();
+    delay(5);
+    lv_tick_inc(5);  // advance LVGL's clock by the 5ms we just slept
+  }
+  ```
+- **This retroactively solved 4.15** (see addendum there): "periodic refresh doesn't pick up runtime style changes" is exactly the fingerprint of a refresh timer that never fires because time never advances. All `lv_refr_now()` workarounds were subsequently removed; pressed-state button colors (runtime style changes handled entirely by LVGL) confirmed rendering on their own on hardware.
+- **Lesson:** a callback being *registered* proves nothing about it being *called*. First test for any callback: print inside it and confirm the print appears at all, before debugging anything downstream of it.
+
+### 4.17 Build failed: `firmware.bin` locked by another process (26-7-2026)
+- `The process cannot access the file because it is being used by another process` on `.pio\build\esp32dev\firmware.bin`, at the build stage (before upload/COM was ever involved).
+- Likely cause: the project lives under `Documents\` (OneDrive-synced on this machine); OneDrive grabs freshly written files for upload and can hold a lock on the constantly rewritten `firmware.bin` at exactly the wrong moment. (Antivirus real-time scanning is the other usual suspect.)
+- **Fix used:** plain retry — these locks are transient, and the second attempt succeeded.
+- **Durable options noted for if it recurs:** move the project outside any synced folder, or relocate just the build output via `build_dir = <path outside OneDrive>` under `[platformio]` in `platformio.ini` (source stays synced/backed up, churning binaries don't).
+
 ---
 
 ## 5. Toolchain Migration: Arduino IDE → PlatformIO
@@ -240,168 +284,57 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 3a | **Manual** button grid + manual coordinate hit-testing (deliberately done before LVGL, for learning) | ✅ Done |
 | 3b | Generalize manual hit-test to all buttons in the grid (loop over all rows/cols) | ✅ Done — `whichButton()` generalized with nested `for(currentRow)/for(currentColumn)` loop, prints `BTN:1`–`BTN:6` using formula `currentRow * maxColumns + currentColumn + 1` |
 | 3c | LVGL setup (replaces manual drawing/hit-testing with a real UI library) | ✅ Done — library installed, config wired, display flush + touch read callbacks working, DRAM overflow fixed, single button + label rendering and confirmed on screen |
-| 3d | LVGL: generalize to full 6-button grid using LVGL widgets | ⏳ **Next immediate step** |
-| 3e | LVGL: styling (background/button colors) | 🟡 Started — background color and button color style confirmed working, including runtime changes from `loop()` (see 4.15) once paired with `lv_refr_now(disp)`; not yet applied across a full grid |
+| 3d | LVGL: generalize to full 6-button grid using LVGL widgets | ✅ Done (26-7-2026) — went straight to the full data-driven multi-page version, skipping the intermediate single-page 6-button step |
+| 3e | LVGL: styling (background/button colors) | ✅ Done (26-7-2026) — color constants centralized, pressed-state feedback via `LV_STATE_PRESSED` styles confirmed on hardware (small touch-to-highlight delay, within acceptable range for resistive touch + LVGL's polling interval). `lv_refr_now` rule obsolete per 4.16. |
+| 3f | LVGL: multi-page navigation (home → category pages → paged categories) | ✅ Done (26-7-2026) — 9 pages working on hardware incl. a 3-page Spotify chain; navigation tested up/down/sideways. Spotify page 3 content is placeholder. |
 | 4 | USB HID | ❌ **Dropped as a requirement** — companion app handles keystroke simulation instead (see section 2) |
-| 5 | Wire button grid → serial (`BTN:n` messages) | 🟡 Partially done — manual hit-test version (3b) prints `BTN:n` correctly; needs porting to the LVGL version once 3d is done (LVGL button click events will replace polling `whichButton()`), and needs the PC side built |
+| 5 | Wire button grid → serial | 🟡 ESP32 side done under **protocol v2** (`CATEGORY:ACTION` strings, see 2.1) — action buttons call `Serial.println(def->action)` on click, fully replacing the manual `whichButton()` polling (which is now deleted). **Explicit monitor verification of the output lines still pending** (navigation + highlights are hardware-verified; the serial lines themselves haven't been checked off). PC side not started. |
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
 | 7 | Python companion app — Spotify (`spotipy`) | ⬜ Not started |
 | 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started |
-| 9 | Polish (icons, config format, case, etc.) | ⬜ Not started |
+| 9 | Polish (icons, config format, case, etc.) | ⬜ Not started — roadmap idea added 26-7-2026: long-term, a layout editor in the companion app (device stores a layout pushed from the PC) so button changes never require compiling firmware; see section 12 item 6 |
 
 **Toolchain/infra status (all done, not part of the numbered roadmap but consumed real time):**
 - ✅ Arduino IDE toolchain fully working on classic ESP32 (superseded by PlatformIO but was the original proof-of-concept environment)
 - ✅ Switched to PlatformIO + VS Code, fully working build/upload/monitor cycle
 - ✅ Git version control set up (command line), repo published to GitHub
 - ✅ LVGL 9.5.0 installed and wired to TFT_eSPI (flush + touch read callbacks), DRAM budget fixed
+- ✅ `lv_tick_inc()` wired in `loop()` — mandatory for LVGL timers on Arduino (see 4.16)
 
 ---
 
 ## 8. Current Working Code (as of this log)
 
-**Manual hit-test version (superseded by LVGL work but kept here as the last known-good pre-LVGL state):**
-```cpp
-#include <Arduino.h>
-#include <SPI.h>
-#include <TFT_eSPI.h>
+**Full current firmware: see git page, date 26-7-2026** (`firmware/src/main.cpp`). Older versions (manual hit-test version, single-button LVGL bring-up) live in git history — no longer embedded here.
 
-TFT_eSPI tft = TFT_eSPI();
+### Architecture of the current firmware (multi-page, data-driven)
 
-uint16_t calData[5] = { 230, 3539, 255, 3493, 5 };
+All UI content lives in `const` data tables at the top of the file; one generic `buildPage()` generates every screen from them.
 
-int size = 120;
-int gap = 20;
-int startX = 40;
-int startY = 40;
-int maxRows = 2;
-int maxColumns = 3;
+- **`ButtonDef`** — one button: label (LVGL symbol + `"\n"` + text glued as adjacent string literals), serial action string, target page. Convention: `action == NULL` means "navigation button, use `targetPage`"; otherwise "action button, send `action` over serial on click". NULL as sentinel — one field, two meanings.
+- **`PageDef`** — one screen: title, pointer to its button array, count, and three navigation links: `parentPage` (back button → home), `prevPage`/`nextPage` (sibling pages within a category). `-1` = link absent = that top-bar button isn't created for this page.
+- **`pages[]`** + a matching **enum** of page indices — the master table. ⚠️ The enum and the array are only connected by *order*; see the checklist below.
+- **Layout:** 50px top bar (back button left at x=8, title centered, prev/next arrows right at x=344/x=412, all 60×40) + 3×2 grid below (140×115 buttons, `start + index*stride` with `xStart=15, xStride=155, yStart=63, yStride=128`; row/col recovered from flat index via `i / gridCols` and `i % gridCols`). Prev/next live in the top bar deliberately, so all 6 grid slots stay available for real actions.
+- **Events:** one shared `actionButtonEvent` for all action buttons and small per-role callbacks for back/prev/next, each receiving its identity via LVGL's `user_data` pointer (the button's own `ButtonDef` row, or the page's `PageDef`). See section 11 for the concept.
+- **Press feedback:** second background color bound to `LV_STATE_PRESSED` per button — LVGL swaps it on touch-down/up itself, zero event code.
+- **Screens:** all built once at boot into a `screens[]` array; page switches are just `lv_screen_load()`. Fine at this scale (~9 pages); revisit only if the tree grows huge.
+- **Colors** centralized as named constants (`COL_ACTION`, `COL_NAV`, pressed variants, etc.) — retheming the device is a six-line edit.
+- Current page tree: Home → {Keybinds, Discord, Spotify 1/2/3 (chained), OBS, Media, System}.
 
-void setup() {
-  tft.setTouch(calData);
-  Serial.begin(115200);
-  tft.init();
-  tft.setRotation(1);
-  tft.fillScreen(TFT_BLACK);
+### How to add a page (validated 26-7-2026 by adding Spotify 3/3 independently)
 
-  for(int currentRow = 0; currentRow < maxRows; currentRow++){
-    for(int currentColumn = 0; currentColumn < maxColumns; currentColumn++){
-      int x = startX + currentColumn * (size + gap);
-      int y = startY + currentRow * (size + gap);
-      tft.fillRect(x, y, size, size, TFT_BLUE);
-    }
-  }
-}
+Four touches, all in the data section, zero logic changes:
 
-void whichButton(uint16_t touchX, uint16_t touchY){
-  for(int currentRow = 0; currentRow < maxRows; currentRow++){
-    for(int currentColumn = 0; currentColumn < maxColumns; currentColumn++){
-      int x = startX + currentColumn * (size + gap);
-      int y = startY + currentRow * (size + gap);
+1. **Button array** — define `xyzButtons[]`, up to 6 entries.
+2. **Enum** — add `PAGE_XYZ` *in the same position* the page will have in `pages[]`.
+3. **`pages[]` row** — insert the entry at that same position.
+4. **Re-link** — if it extends a category chain: previous page's `nextPage` → new page, new page's `prevPage` → back. Update the "n/m" counts in the title strings of every page in the chain (the counts are plain data in the titles, nothing computes them).
 
-      if(touchX >= x && touchX <= x + size && touchY >= y && touchY <= y + size){
-        int buttonNumber = currentRow * maxColumns + currentColumn + 1;
-        Serial.print("BTN:");
-        Serial.println(buttonNumber);
-      }
-    }
-  }
-}
+**THE trap:** enum and `pages[]` are connected only by order. Adding the enum entry in one place and the array row in another silently shifts every later page index onto the wrong screen. Insert both in the same spot, always.
 
-void loop() {
-  uint16_t touchX, touchY;
-  if(tft.getTouch(&touchX, &touchY)) {
-    whichButton(touchX, touchY);
-  }
-}
-```
+Convention decided: back from any page in a chain goes straight to home (`parentPage = PAGE_HOME` for all of them); prev/next handle movement within the chain, so back never duplicates prev.
 
-**Current LVGL bring-up version (cleaned up after the section 4.15 refresh-bug debugging — single button confirmed working on hardware, including runtime style changes):**
-```cpp
-#include <Arduino.h>
-#include <SPI.h>
-#include <TFT_eSPI.h>
-#include <lvgl.h>
-
-TFT_eSPI tft = TFT_eSPI();
-
-static const uint16_t screenWidth = 480;
-static const uint16_t screenHeight = 320;
-
-lv_obj_t *btn;
-lv_display_t *disp; // global — needed to force a manual refresh from loop(), see note below
-
-// Partial line-buffer, not a full-screen buffer — a full screen's worth of
-// pixels doesn't fit in available RAM alongside everything else LVGL/Arduino
-// needs. LVGL redraws in horizontal strips instead. Sized at screenWidth * 20
-// after a DRAM overflow at screenWidth * 40 (see section 4.12).
-static uint16_t buf1[screenWidth * 20];
-
-uint16_t calData[5] = { 230, 3539, 255, 3493, 5 };
-
-// Tells LVGL how to push its rendered pixels to the real screen
-void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
-  uint32_t w = lv_area_get_width(area);
-  uint32_t h = lv_area_get_height(area);
-
-  tft.startWrite();
-  tft.setAddrWindow(area->x1, area->y1, w, h);
-  tft.pushColors((uint16_t *)px_map, w * h, true);
-  tft.endWrite();
-
-  lv_display_flush_ready(disp);
-}
-
-// Tells LVGL how to check for touch, using the existing tft.getTouch()
-void my_touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
-  uint16_t touchX, touchY;
-  if (tft.getTouch(&touchX, &touchY)) {
-    data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = touchX;
-    data->point.y = touchY;
-  } else {
-    data->state = LV_INDEV_STATE_RELEASED;
-  }
-}
-
-void setup() {
-  Serial.begin(115200);
-  tft.init();
-  tft.setRotation(1);
-  tft.setTouch(calData);
-
-  lv_init();
-
-  disp = lv_display_create(screenWidth, screenHeight);
-  lv_display_set_flush_cb(disp, my_disp_flush);
-  lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-  lv_indev_t *indev = lv_indev_create();
-  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-  lv_indev_set_read_cb(indev, my_touch_read);
-
-  // button — created ONCE here, never in loop() (see section 4.15 for what
-  // happens if this ends up in loop() by accident: a fresh button every ~5ms)
-  btn = lv_button_create(lv_screen_active());
-  lv_obj_set_size(btn, 120, 120);
-  lv_obj_set_pos(btn, 40, 40);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(0xFF6B00), 0);
-
-  lv_obj_t *label = lv_label_create(btn);
-  lv_label_set_text(label, "1");
-}
-
-void loop() {
-  lv_timer_handler();
-  delay(5);
-
-  // NOTE: any style/property change made here (from loop(), after initial
-  // setup-time creation) needs lv_refr_now(disp) right after it, or the
-  // change silently won't render — LVGL's normal periodic refresh didn't
-  // reliably pick up runtime style changes during testing (section 4.15).
-}
-```
-
-Confirmed on hardware: one orange 120×120 button at (40,40) with white "1" label, correctly rendered via the flush/touch callback pipeline, and confirmed that runtime style changes (background/button color, triggered by touch from `loop()`) work correctly when paired with `lv_refr_now(disp)`. Not yet generalized to all 6 buttons (3d, next step).
+Known placeholder: Spotify 3/3's labels/icons are copy-paste artifacts that don't match the actions its buttons actually send (e.g. a "Queue"-labelled button sends `SPOTIFY:SEEKFWD`). Harmless as a navigation test, must be filled in or parked before relying on it.
 
 ---
 
@@ -422,9 +355,17 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - Explicitly paused mid-implementation to ask "is LVGL really the best way to do this?" rather than just continuing on inertia once real friction (memory tuning, new syntax) showed up — a good habit of periodically re-justifying a tool choice against the actual project scope rather than sunk-cost continuing. Confirmed LVGL was the right call once the actual scope ("infinite" nested menus) was stated explicitly, since that's precisely the class of problem LVGL's screen/object model solves and hand-rolling would solve badly.
 - The section 4.15 refresh-bug investigation was a genuine, non-trivial debugging session (not a simple typo) — worth highlighting for the portfolio reflection specifically because the student pushed back on a plausible-but-wrong first fix (rejecting "it just glitched" as an explanation) and insisted on isolating the real cause via a structured process: bisecting between known-working and known-broken versions, adding targeted instrumentation (heartbeat prints, flush-call logging, pointer comparisons) rather than guessing repeatedly, and correctly noticing when a diagnostic print's *text* had drifted from what the code *actually* did after incremental edits. This is a strong, concrete example of real debugging methodology for the eventual portfolio reflection, distinct from hardware debugging (section 4) — this time entirely in software/library behavior.
 
+**Added 26-7-2026 (multi-page prototype session):**
+
+- **Mode shift, explicitly chosen:** this session ran in deliberate prototype-rush mode ("need a working prototype to start the Python application") — the multi-page firmware was written by the AI at the student's explicit request, consistent with the established LVGL-boilerplate precedent, with every new C concept annotated in-chat rather than scaffolded as discovery exercises. A plan was still made and reviewed *before* any code was written (page tree, layout, protocol, event model), at the student's insistence ("plan first").
+- The 4.16 tick investigation completes the 4.15 story arc for the portfolio: the same structured instrumentation method (heartbeat print, outcomes mapped to culprits in advance) applied a second time found in one step the root cause that 4.15's longer investigation had only worked around. Good concrete example of a debugging *method* paying compound interest — and of the lesson that a workaround left in place can hide a root cause until something else depends on the same broken mechanism.
+- The student **independently executed the add-a-page checklist** (Spotify 3/3) correctly on first try, including dodging the enum/array ordering trap it warns about — the data-driven design's "adding a page is a data edit" claim validated by someone other than its author. (Placeholder labels/actions on the new page were a conscious shortcut, not an error.)
+- **Honest self-assessment to preserve:** the student flagged that the overall code structure still feels rough and that the `user_data`/`void *` mechanism hasn't fully landed yet, and plans to study it further — section 11 exists as the study material for exactly this. Concepts introduced this session (structs as data tables, function pointers, `user_data`, `%`//`/` index math) are *explained and used*, not yet independently *produced* — the distinction matters for an honest portfolio reflection.
+- The student raised the maintainability question unprompted ("how would someone less tech-savvy edit this?") — led to a mapped-out ladder from small robustness fixes (count macro, auto-linking) through config-as-data to a full layout editor in the companion app, with the deliberate decision to *not* build any of it yet (the app it would configure doesn't exist). Thinking about future users/maintainers, not just the device working, is portfolio-reflection material.
+
 ---
 
-## 10. Coding Style Conventions (established this session, applies going forward to all project code)
+## 10. Coding Style Conventions (established earlier, applies to all project code)
 
 Derived from reviewing the student's own APDS-9960 sensor library (a separate project, used as the reference style) and agreed to carry into the streamdeck firmware for consistency:
 
@@ -440,17 +381,51 @@ Derived from reviewing the student's own APDS-9960 sensor library (a separate pr
 - Bit-masking/shifting operations get a plain-English translation of the hardware effect alongside the line, not a restatement of the C operator.
 - No comments that merely restate what the code syntax already says.
 
+*Status 26-7-2026: the current `main.cpp` follows these conventions from the start (English comments, concern-based section dividers, decoded constants, gotcha file header) — the old "retroactively apply style" next-step item is satisfied.*
+
 ---
 
-## 11. Immediate Next Steps for Next Session
+## 11. C Concepts Reference (introduced in the multi-page build — study material)
 
-*(as of this log update)*
+*Things that were new on 26-7-2026. `user_data` especially — flagged as not yet solid; revisit until it sticks, then rewrite this section in your own words (rewritten explanations stick better than read ones).*
 
-1. Generalize the current single-button LVGL code into the full 6-button grid: loop over `currentRow`/`currentColumn` (same math as sections 3b/8) and call `lv_button_create` + `lv_label_create` once per button instead of once total, converting the numeric button number to a string for the label (e.g. via `snprintf`) — this conversion step was flagged but not yet written. Figure out where per-button click handling will hook in (LVGL event callbacks, e.g. `lv_obj_add_event_cb`) to eventually replace the manual `whichButton()` polling loop.
-2. Keep the section 4.15 lesson in mind while building the grid: any button color/state change triggered at runtime (e.g. a pressed/active visual state) needs `lv_refr_now(disp)` right after the style call, or it may silently not render.
-3. Once the 6-button LVGL grid renders and is stylistically settled (colors applied consistently, not just on button #1), revisit whether `whichButton()`/manual hit-testing code should be removed from `main.cpp` entirely now that LVGL owns touch handling, or kept commented for reference.
-4. Wire LVGL button click events to print `BTN:1`–`BTN:6` over serial (replacing the old `Serial.println` calls in the manual `whichButton()`), completing roadmap item 5 for the LVGL version.
-5. Now that "infinite" nested menus are the confirmed target (section 9), sketch the intended menu structure (how many levels deep, rough total menu count) before wiring navigation — planned so the 6-button loop isn't rebuilt once multi-screen navigation (`lv_screen_create`/`lv_screen_load`) gets layered in.
-6. Start scaffolding the Python companion app (`companion-app/`) — begin with `spotipy` working standalone in a terminal (no ESP32 involved) before wiring it to serial.
+### `user_data` and `void *` — the coat check
+
+`lv_obj_add_event_cb(btn, actionButtonEvent, LV_EVENT_CLICKED, (void *)def)` works like a coat check:
+
+1. **Check-in** (in `buildPage`): the last argument hands LVGL "a thing" to store with this specific button — here, a pointer to this button's own row in the data table.
+2. **Storage:** LVGL keeps it as `void *` — pointer to *something*, type deliberately erased. LVGL is generic and can't know `ButtonDef` exists. The clerk stores coats, bags, umbrellas — same shelf, no questions asked.
+3. **Pick-up** (in the callback): `lv_event_get_user_data(e)` returns the exact same pointer, still as `void *`. The cast `(const ButtonDef *)` is me saying "unwrap this as what I know I checked in."
+
+**Why it exists:** `actionButtonEvent` is ONE function shared by ~30 buttons. When it fires it must answer "which button was I?" — the answer is whatever was checked in with that widget. Each button carries a pointer to its own identity. Without this: 30 separate callback functions.
+
+**Full trace of one button's life:** boot → `buildPage` reaches `i=1` of `spotifyButtons` → `def` points at the `"Next" / "SPOTIFY:NEXT"` row → that pointer is checked in with the newly created button. Later: tap → LVGL finds that widget's stored callback + pointer → calls `actionButtonEvent` → cast unwraps → `def->action` → `Serial.println("SPOTIFY:NEXT")`. The table row and the on-screen button are permanently linked by one stored pointer.
+
+### Structs and arrays of structs
+
+A `struct` bundles variables under one name (`ButtonDef` = label + action + target traveling together). `.` accesses fields on a value, `->` through a pointer — same rule as `data->state` in the touch callback. An array of structs, each `{ ... }` filling one struct's fields in order, is the data table the whole UI is generated from.
+
+### Function pointers
+
+`makeBarButton(..., lv_event_cb_t callback, ...)` — a parameter that holds *which function to call*. These were in use all along without the name: passing `backButtonEvent` to `lv_obj_add_event_cb` passes the function itself as a value. The helper just makes it explicit — the caller picks the callback the same way it picks the x-position.
+
+### Smaller ones
+
+- `LV_SYMBOL_COPY "\nCopy"` — adjacent string literals are glued into one string at compile time; the symbol macros are themselves just short strings (special font characters), so this yields icon + newline + text in one label.
+- `i % gridCols` / `i / gridCols` — recover column and row from a flat index (the inverse of the old nested row/col loops), feeding into the familiar `start + index * stride`.
+- `sizeof(pages) / sizeof(pages[0])` — element count of an array (total bytes / bytes per element); never goes stale when rows are added.
+- `NULL` as sentinel — one field doing double duty ("no action" *means* "this is a navigation button").
+
+---
+
+## 12. Immediate Next Steps for Next Session
+
+*(as of 26-7-2026 — old list fully superseded; items 1–5 of the old list are done, old item 6 carried forward as item 3 below, old item 7 carried as item 7, old item 8 satisfied per section 10 note)*
+
+1. **Verify serial output explicitly** — open the monitor, press action buttons, confirm clean `SPOTIFY:NEXT`-style lines appear. Navigation and press-highlights are hardware-verified; the serial lines themselves haven't been explicitly checked off, and the entire companion app builds on them. 30-second check, do it first.
+2. **Spotify 3/3** — fill in real content (labels/icons currently don't match the actions sent), or park the page by setting page 2's `nextPage` back to `-1` until needed.
+3. **Start `companion-app/`** — `spotipy` standalone first: OAuth + play/pause/next working from a plain Python script in a terminal, no ESP32/serial involved yet.
+4. **Serial glue** — `pyserial` reading lines from the ESP32, dispatching on the `CATEGORY:ACTION` protocol (section 2.1). Start with `KEY:` actions via keystroke simulation and `SPOTIFY:` via the spotipy work from step 3.
+5. **Robustness pass on the data tables** (small, do whenever convenient): `COUNT(arr)` macro so `buttonCount` can't be miscounted; optionally auto-link `prevPage`/`nextPage` (and the "n/m" title counts) at boot from a category field, removing the two most error-prone steps of the add-a-page checklist.
+6. **Long-term roadmap item (parked deliberately):** layout editor in the companion app — device stores a layout pushed from the PC over serial, so changing buttons never requires compiling firmware. End-game for maintainability by non-technical users. Explicitly not started until the companion app exists at all.
 7. Consider testing the ESP32-S2 mini again at some point out of curiosity (not urgent, no longer blocking anything) — possibly with a multimeter check of VBUS/GND voltage, which was never actually done.
-8. Apply the comment-style conventions (section 10) retroactively to `main.cpp` if/when convenient — not urgent, but worth doing before the file grows much larger.
