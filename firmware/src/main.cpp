@@ -120,16 +120,16 @@ static const ButtonDef obsButtons[] = {
 };
 
 static const ButtonDef mediaButtons[] = {
-  { LV_SYMBOL_PLAY       "\nPlay/Pause", "MEDIA:PLAYPAUSE", 0 },
-  { LV_SYMBOL_NEXT       "\nNext",       "MEDIA:NEXT",      0 },
-  { LV_SYMBOL_PREV       "\nPrevious",   "MEDIA:PREV",      0 },
-  { LV_SYMBOL_VOLUME_MAX "\nVol +",      "MEDIA:VOLUP",     0 },
-  { LV_SYMBOL_VOLUME_MID "\nVol -",      "MEDIA:VOLDOWN",   0 },
-  { LV_SYMBOL_MUTE       "\nMute",       "MEDIA:MUTE",      0 },
+  { LV_SYMBOL_PLAY       "\nPlay/Pause", "KEY:MEDIA_PLAYPAUSE", 0 },
+  { LV_SYMBOL_NEXT       "\nNext",       "KEY:MEDIA_NEXT",      0 },
+  { LV_SYMBOL_PREV       "\nPrevious",   "KEY:MEDIA_PREV",      0 },
+  { LV_SYMBOL_VOLUME_MAX "\nVol +",      "KEY:MEDIA_VOLUP",     0 },
+  { LV_SYMBOL_VOLUME_MID "\nVol -",      "KEY:MEDIA_VOLDOWN",   0 },
+  { LV_SYMBOL_MUTE       "\nMute",       "KEY:MEDIA_MUTE",      0 },
 };
 
 static const ButtonDef systemButtons[] = {
-  { LV_SYMBOL_CLOSE "\nLock PC", "SYS:LOCK",  0 },
+  { LV_SYMBOL_CLOSE "\nLock PC", "KEY:WIN+L",  0 },
   { LV_SYMBOL_POWER "\nSleep",   "SYS:SLEEP", 0 },
 };
 
