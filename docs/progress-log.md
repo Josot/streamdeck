@@ -26,7 +26,7 @@ Two architectures were considered:
 
 **This last point was a major realization mid-project**: since the PC app can simulate keypresses itself, the microcontroller's USB HID capability became irrelevant. This eliminated the need for a USB-OTG-capable chip (ESP32-S2/S3) and let us fall back to using the plain classic ESP32 we already had proven working, rather than debugging an unknown/possibly-dead S2 mini.
 
-**Serial protocol (original plan, superseded — see v2 below):** simple line-based text over USB serial.
+**Serial protocol (original plan, superseded — see v2/v3 below):** simple line-based text over USB serial.
 - ESP32 → PC: `BTN:7` (button press events)
 - PC → ESP32: `TRACK:...`, `SCENE:...`, `MUTE:1` (status pushes, for showing now-playing track / highlighting active OBS scene / mic-mute indicator on screen)
 - OBS pushes events instantly (websocket). Spotify has no push mechanism — PC app must poll `currently-playing` periodically (a few seconds' lag is fine and expected).
@@ -49,6 +49,30 @@ DISCORD:MUTE
 ### 2.2 UI architecture: data-driven pages (26-7-2026)
 
 The multi-page UI is generated from `const` data tables, not written as code-per-screen — one generic `buildPage()` function turns a `PageDef` into a full LVGL screen. Rejected alternative: a hand-written create-function per screen (7+ near-identical functions, doesn't scale to the "infinite nested menus" target). Details of the structure live in section 8; the reasoning is: adding a page must be a data edit, not new layout code.
+
+### 2.3 Serial protocol v3 (1-8-2026) — the category names the *mechanism*, not the app
+
+Refinement of v2, prompted by the student asking whether categories should be app-based and nestable (e.g. `DISCORD:KEY:CTRL+SHIFT+M`) to support users adding arbitrary things later.
+
+**Decision: the category names how the PC should *execute* the action, not which app it belongs to.**
+
+| Category | Mechanism |
+|---|---|
+| `KEY:` | simulate keystrokes (incl. media keys) via pynput |
+| `SHELL:` | run a command / launch a program — **planned, nothing built on either side yet** |
+| `SPOTIFY:` | Spotify Web API via spotipy (not implemented yet) |
+| `OBS:` | OBS websocket via obsws-python (not implemented yet) |
+
+**Reasoning:** the Python side's only real decision is "how do I execute this?" A Discord mute via keystroke and a Copy via keystroke are the *same operation* — same code path. An app-first prefix would mean either duplicating the keystroke logic per app, or stripping the prefix and delegating, which makes the prefix decorative. Grouping-by-app is a *display* concern that belongs in future config metadata, not in the wire protocol.
+
+**Consequences applied to the firmware:**
+- `MEDIA:PLAYPAUSE` → `KEY:MEDIA_PLAYPAUSE` (and the other five media buttons) — **done, working**
+- `SYS:LOCK`, `SYS:SLEEP` → `SHELL:...` (both need real commands, see 4.18) — **not done yet, System page still sends `SYS:`**
+- `DISCORD:*` → `KEY:CTRL+SHIFT+M` etc., since Discord's mute/deafen are just global hotkeys
+- `SPOTIFY:` shrinks to only what media keys can't do (Like, seek, queue, reading now-playing); transport controls can go through `KEY:MEDIA_*` and work with no OAuth at all
+- The `SYS:` and `MEDIA:` categories disappear entirely
+
+**On "infinite" extensibility:** the category set is bounded by what the Python app knows how to do (~4 categories, ever), *not* by what users want on buttons. User freedom comes from (a) `KEY:` and `SHELL:` being generic escape hatches that can trigger essentially anything on the machine, and (b) free-form layout — any action on any button on any page.
 
 ---
 
@@ -161,6 +185,7 @@ This section is important for the portfolio reflection — it documents real deb
 - `A fatal error occurred: Could not open COM13, the port is busy or doesn't exist.` / `PermissionError(13, 'Access is denied.')`
 - **Cause:** a serial monitor session from the previous `--target upload --target monitor` run was still holding COM13 open in a VS Code terminal tab.
 - **Fix:** closed the leftover monitor terminal (Ctrl+C / close tab), retried upload — worked immediately. Noted as a recurring class of issue to check first whenever a COM port "goes missing" after a monitor session.
+- **Recurs on the Python side (1-8-2026):** the companion app and PlatformIO's monitor compete for the same port. Only one program can hold COM13 — close the monitor before running the Python app, and vice versa.
 
 ### 4.14 First LVGL screen render was blank/white — expected, not a bug
 - After the DRAM fix, first successful flash showed a plain white screen with backlight on, no visible content.
@@ -205,6 +230,17 @@ This section is important for the portfolio reflection — it documents real deb
 - **Fix used:** plain retry — these locks are transient, and the second attempt succeeded.
 - **Durable options noted for if it recurs:** move the project outside any synced folder, or relocate just the build output via `build_dir = <path outside OneDrive>` under `[platformio]` in `platformio.ini` (source stays synced/backed up, churning binaries don't).
 
+### 4.18 Win+L cannot be simulated — Windows blocks it at OS level (1-8-2026)
+- `KEY:WIN+L` (lock PC) fired from the device produced only a typed letter `l` in the focused window. Every other combo tested worked fine.
+- **Cause:** Win+L sits in the same protected category as Ctrl+Alt+Del — Windows intercepts it below the normal input layer, deliberately, so that no program can lock the machine or fake a lock screen. pynput emits the events; Windows swallows the Win part and the `l` falls through to whatever has focus.
+- **Not a code bug** — it will never work through keystroke simulation, from any library.
+- **Fix:** use the Windows API call instead, via the `SHELL:` category (see 2.3):
+  ```
+  SHELL:rundll32.exe user32.dll,LockWorkStation
+  ```
+  Same reasoning applies to sleep: `rundll32.exe powrprof.dll,SetSuspendState 0,1,0`. Neither is implemented yet — the `SHELL:` handler is still to be written.
+- **Lesson worth keeping:** "the OS refuses to do this on purpose" is a real category of cause, distinct from a bug. Worth suspecting whenever exactly one shortcut fails while everything else works.
+
 ---
 
 ## 5. Toolchain Migration: Arduino IDE → PlatformIO
@@ -246,7 +282,9 @@ build_flags =
 
 Installed LVGL version resolved to **9.5.0** (from the `^9.2` range).
 
-**Serial monitor in PlatformIO:** plug icon 🔌 in the bottom VS Code toolbar, or `pio device monitor` in terminal. Respects `monitor_speed` from the ini file automatically. **Note:** leaving a monitor session open blocks the next upload attempt on that COM port (see 4.13) — close it before re-uploading.
+**Serial monitor in PlatformIO:** plug icon 🔌 in the bottom VS Code toolbar, or `pio device monitor` in terminal. Respects `monitor_speed` from the ini file automatically. **Note:** leaving a monitor session open blocks the next upload attempt on that COM port (see 4.13) — close it before re-uploading, and also before running the Python companion app.
+
+**Python side (added 1-8-2026):** plain Python, no virtualenv yet. Dependencies: `pip install pyserial pynput`. Note the import mismatch — the package is `pyserial` but the import is `import serial`.
 
 ---
 
@@ -266,7 +304,7 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 │   ├── include/
 │   │   └── lv_conf.h        (LVGL config, copied from template — see section 4.11)
 │   └── lib/
-└── companion-app/            (Python companion app — not started yet)
+└── companion-app/            (Python companion app — started 1-8-2026)
 ```
 
 - Git set up via command line (`git init`, manual `.gitignore` creation via Notepad, `git add .` + `git commit`) after GitHub Desktop's dialogs caused confusion.
@@ -288,11 +326,13 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 3e | LVGL: styling (background/button colors) | ✅ Done (26-7-2026) — color constants centralized, pressed-state feedback via `LV_STATE_PRESSED` styles confirmed on hardware (small touch-to-highlight delay, within acceptable range for resistive touch + LVGL's polling interval). `lv_refr_now` rule obsolete per 4.16. |
 | 3f | LVGL: multi-page navigation (home → category pages → paged categories) | ✅ Done (26-7-2026) — 9 pages working on hardware incl. a 3-page Spotify chain; navigation tested up/down/sideways. Spotify page 3 content is placeholder. |
 | 4 | USB HID | ❌ **Dropped as a requirement** — companion app handles keystroke simulation instead (see section 2) |
-| 5 | Wire button grid → serial | 🟡 ESP32 side done under **protocol v2** (`CATEGORY:ACTION` strings, see 2.1) — action buttons call `Serial.println(def->action)` on click, fully replacing the manual `whichButton()` polling (which is now deleted). **Explicit monitor verification of the output lines still pending** (navigation + highlights are hardware-verified; the serial lines themselves haven't been checked off). PC side not started. |
+| 5 | Wire button grid → serial | ✅ **Done (1-8-2026)** — action strings confirmed arriving in the Python app; protocol upgraded to v3 (see 2.3) |
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
-| 7 | Python companion app — Spotify (`spotipy`) | ⬜ Not started |
+| 7a | Python companion app — keystroke dispatcher | ✅ **Done (1-8-2026)** — reads serial, parses `CATEGORY:ACTION`, resolves arbitrary key combos, executes them. Keybinds page and Media page both confirmed working end-to-end on hardware. **Written by the student**, incrementally. |
+| 7b | `SHELL:` category — Python handler **and** firmware action strings | ⬜ Not started on either side. Needed for Lock PC and Sleep (see 4.18); System page still sends `SYS:`, which nothing handles. |
+| 7c | Python companion app — Spotify (`spotipy`) | 🟡 Partially bypassed — Spotify **transport** (play/pause, next, prev, volume) now works via media keys with no API at all. API still needed for: Like, seek, queue, and reading now-playing for the display. |
 | 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started |
-| 9 | Polish (icons, config format, case, etc.) | ⬜ Not started — roadmap idea added 26-7-2026: long-term, a layout editor in the companion app (device stores a layout pushed from the PC) so button changes never require compiling firmware; see section 12 item 6 |
+| 9 | Polish (icons, config format, case, etc.) | ⬜ Not started — roadmap idea: long-term, a layout editor in the companion app (device stores a layout pushed from the PC) so button changes never require compiling firmware; see section 12 |
 
 **Toolchain/infra status (all done, not part of the numbered roadmap but consumed real time):**
 - ✅ Arduino IDE toolchain fully working on classic ESP32 (superseded by PlatformIO but was the original proof-of-concept environment)
@@ -300,14 +340,15 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 - ✅ Git version control set up (command line), repo published to GitHub
 - ✅ LVGL 9.5.0 installed and wired to TFT_eSPI (flush + touch read callbacks), DRAM budget fixed
 - ✅ `lv_tick_inc()` wired in `loop()` — mandatory for LVGL timers on Arduino (see 4.16)
+- ✅ Python environment working (`pyserial` + `pynput`); full touchscreen → ESP32 → USB → Python → real keystroke pipeline proven on hardware
 
 ---
 
 ## 8. Current Working Code (as of this log)
 
-**Full current firmware: see git page, date 26-7-2026** (`firmware/src/main.cpp`). Older versions (manual hit-test version, single-button LVGL bring-up) live in git history — no longer embedded here.
+**Full current firmware and companion app: see git page, date 1-8-2026** (`firmware/src/main.cpp`, `companion-app/`). Older versions live in git history — no longer embedded here.
 
-### Architecture of the current firmware (multi-page, data-driven)
+### 8.1 Firmware architecture (multi-page, data-driven)
 
 All UI content lives in `const` data tables at the top of the file; one generic `buildPage()` generates every screen from them.
 
@@ -320,8 +361,9 @@ All UI content lives in `const` data tables at the top of the file; one generic 
 - **Screens:** all built once at boot into a `screens[]` array; page switches are just `lv_screen_load()`. Fine at this scale (~9 pages); revisit only if the tree grows huge.
 - **Colors** centralized as named constants (`COL_ACTION`, `COL_NAV`, pressed variants, etc.) — retheming the device is a six-line edit.
 - Current page tree: Home → {Keybinds, Discord, Spotify 1/2/3 (chained), OBS, Media, System}.
+- **Partial protocol v3 migration (1-8-2026):** Media page now sends `KEY:MEDIA_*` and works end-to-end. Discord and System pages still send the old `DISCORD:`/`SYS:` strings — migrating them is pending (System needs the `SHELL:` handler first).
 
-### How to add a page (validated 26-7-2026 by adding Spotify 3/3 independently)
+### 8.2 How to add a page (validated 26-7-2026 by adding Spotify 3/3 independently)
 
 Four touches, all in the data section, zero logic changes:
 
@@ -334,7 +376,25 @@ Four touches, all in the data section, zero logic changes:
 
 Convention decided: back from any page in a chain goes straight to home (`parentPage = PAGE_HOME` for all of them); prev/next handle movement within the chain, so back never duplicates prev.
 
-Known placeholder: Spotify 3/3's labels/icons are copy-paste artifacts that don't match the actions its buttons actually send (e.g. a "Queue"-labelled button sends `SPOTIFY:SEEKFWD`). Harmless as a navigation test, must be filled in or parked before relying on it.
+Known placeholder: Spotify 3/3's labels/icons are copy-paste artifacts that don't match the actions its buttons actually send. Harmless as a navigation test, must be filled in or parked before relying on it.
+
+### 8.3 Companion app architecture (Python, written 1-8-2026)
+
+Single script, no classes. Flow:
+
+1. **Open the port** — `serial.Serial(comPort, baudRate, timeout=1)`. Port and baud hardcoded (`COM13`, 115200); baud must match `Serial.begin()` in the firmware or the bytes are gibberish.
+2. **Read loop** — `connection.readline()` returns raw **bytes** ending in `\r\n`. Decoded with `errors="replace"` (the ESP32 emits boot garbage when the port opens, because opening it toggles DTR/RTS and resets the board) and `.strip()`ed. An empty result means the 1s timeout expired with nothing received; skipped via `if not line: continue`. That timeout is also what keeps Ctrl+C responsive.
+3. **Split** — `line.split(":", 1)` into category + action. The `1` limit matters so `OBS:SCENE:1` keeps `SCENE:1` intact. Guarded by `if ":" not in line: continue` — without it, boot noise containing no colon raises `ValueError` on the two-name unpack.
+4. **Resolve** (`KEY:` only) — `action.split("+")` gives individual key names; each goes through `function_resolve_keys()`: in the `KEY_NAMES` dict → return the pynput object; single character → return it lowercased (pynput accepts plain strings); otherwise → `None`. If any name resolved to `None`, the line is reported and skipped **before anything is pressed** — otherwise a modifier could be left stuck down with nothing to release it.
+5. **Execute** (`function_execute_keybinds()`) — `resolvedKeys[:-1]` are held down, `resolvedKeys[-1]` is tapped, then the held keys are released in reverse order. This ordering *is* the keybind: the tapped key must go down while the others are already held, or the OS just sees separate keystrokes.
+
+`KEY_NAMES` maps firmware-side names to pynput objects, including media keys (`MEDIA_PLAYPAUSE` → `Key.media_play_pause`, etc.). The `MEDIA_` prefix was added deliberately to avoid a future collision with a plain `NEXT`/`PREV`. Note `WIN` maps to `Key.cmd` — pynput is cross-platform and names the Windows key after the Mac Command key.
+
+**Payoff of the parsing approach:** adding a keybind that only uses already-known keys requires **no Python changes at all** — it's a firmware-only edit. A keybind using a new named key is one dict entry.
+
+**Known assumption (discussed, deliberately kept):** everything except the last key is treated as held. Nothing validates that the held keys are actually modifiers, so `KEY:C+CTRL` would hold "c" and tap Ctrl without complaint. Left permissive on purpose — it's what makes non-standard combos like Discord's `CTRL+N+P` work (Discord does its own key-state tracking rather than using Windows' registered-hotkey API).
+
+**Known limitation:** *sequential* combos (VS Code's `Ctrl+K Ctrl+C`) can't be expressed — the format has no way to say "release everything, then do another combo." Solvable either firmware-side (two `Serial.println` calls, zero Python changes) or Python-side (a `;` separator). Not built; noted as solvable when needed.
 
 ---
 
@@ -363,6 +423,21 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - **Honest self-assessment to preserve:** the student flagged that the overall code structure still feels rough and that the `user_data`/`void *` mechanism hasn't fully landed yet, and plans to study it further — section 11 exists as the study material for exactly this. Concepts introduced this session (structs as data tables, function pointers, `user_data`, `%`//`/` index math) are *explained and used*, not yet independently *produced* — the distinction matters for an honest portfolio reflection.
 - The student raised the maintainability question unprompted ("how would someone less tech-savvy edit this?") — led to a mapped-out ladder from small robustness fixes (count macro, auto-linking) through config-as-data to a full layout editor in the companion app, with the deliberate decision to *not* build any of it yet (the app it would configure doesn't exist). Thinking about future users/maintainers, not just the device working, is portfolio-reflection material.
 
+**Added 1-8-2026 (firmware walkthrough + companion app session):**
+
+- **Structured walkthrough of code the student did not write.** The session opened by dissecting the previous session's AI-written firmware in six planned parts (skeleton → hardware glue → data model → page builder → events → end-to-end trace), student-paced, with follow-up questions driving the depth (`lv_timer_handler`, what "dirty" means, `lv_screen_load` and preloading, what `PageDef`'s buttons pointer does, `*` vs `&`). Reading unfamiliar code is a distinct skill from writing it — worth naming as such in the portfolio rather than folding into "learned LVGL."
+- **Mid-walkthrough pushback: "this is much complexer with LVGL than it would be normal."** This prompted separating two things being blamed on one cause: complexity LVGL genuinely imposes (screens, dirty areas, callbacks) versus complexity the *chosen architecture* imposes (data tables, generic builder, `user_data` — none of which LVGL requires). An explicit offer was made to rewrite it as a dumber ~700-line, one-explicit-function-per-screen version the student would fully own, with the trade-off stated (the config-from-PC roadmap item would become a rewrite rather than an extension). The student declined and continued. The architecture was therefore **re-consented to, not merely inherited** — worth recording.
+- **Pointers were explicitly parked, not faked.** After several explanations (`*` vs `&`, dereferencing, why a copy wouldn't work for `def`), the student said "pointers are confusing" and chose to let it rest for now. Recorded honestly rather than papered over. The working model they *do* hold — "a pointer is a handle to a thing that lives somewhere else; read it with `->`" — is sufficient to read the firmware fluently, and the theory can wait until something forces it.
+- **The entire Python companion app was written by the student**, in the same incremental style as the early display work: AI described the pieces and the pitfalls, student wrote every line. Progression: bare serial read → decode/strip → empty-line guard → colon guard → category/action split → `KEY_NAMES` dict → resolver function → validation pass → press/release execution → refactor into two functions. Real bugs made and fixed along the way:
+  - `serial.Serial(...)` called without assigning the result (connection object discarded)
+  - `serial.readline()` — calling a method on the *module* instead of the connection object
+  - `line = print(...)` — assigning `print`'s return value (`None`), then calling `.split()` on it
+  - the press/release block indented *outside* the `if category == "KEY"` branch, so a Spotify press would have re-fired a stale keybind from a previous line
+  - `=<` instead of `<=`; `return` used at top level outside any function; a missing comma in `print()`
+- **The student challenged the design twice, correctly both times.** First: *"I don't think it is smart to assume everything except the last one being modifiers?"* — a legitimate challenge to an unvalidated assumption, which surfaced where that assumption comes from and what it can't catch. Second, and more consequentially: asked whether categories should be app-first and nestable (`DISCORD:KEY:...`) so users could add arbitrary things later — which directly produced **protocol v3** (section 2.3). The resulting rule (category names the *mechanism*, not the app) is a better design than what the AI had originally specified, and it also happens to be what makes the future config-editor idea viable.
+- **The student empirically corrected the AI.** Told that Windows shortcuts are always "modifiers + exactly one key" and that `CTRL+N+P` therefore couldn't be configured anywhere, they went and tested it in Discord and reported that it *was* recordable. Correct — Discord does its own key-state tracking rather than using Windows' registered-hotkey API. Checking a confident claim against reality instead of accepting it is exactly the habit worth documenting for the reflection.
+- **Naming and comments were actively negotiated, not accepted by default** — `modifiers` was rejected as unclear and replaced with `heldKeys`/`tappedKey`; the student asked what a *decent* comment on `KEY_NAMES` would be rather than accepting a generated one. Consistent with the section 10 conventions being treated as a live standard rather than a one-off decision.
+
 ---
 
 ## 10. Coding Style Conventions (established earlier, applies to all project code)
@@ -381,13 +456,15 @@ Derived from reviewing the student's own APDS-9960 sensor library (a separate pr
 - Bit-masking/shifting operations get a plain-English translation of the hardware effect alongside the line, not a restatement of the C operator.
 - No comments that merely restate what the code syntax already says.
 
-*Status 26-7-2026: the current `main.cpp` follows these conventions from the start (English comments, concern-based section dividers, decoded constants, gotcha file header) — the old "retroactively apply style" next-step item is satisfied.*
+*Status 1-8-2026: the firmware follows these conventions. The Python companion app follows them in spirit — its comments explain non-obvious "why" (why `split(":", 1)` takes a limit, why empty lines appear, why held and tapped keys are separated), not what the syntax already says. Naming in the Python file is currently mixed camelCase/snake_case (`baudRate` next to `resolvedKeys`); Python's own convention is snake_case for variables and ALL_CAPS for constants. Worth aligning eventually, not urgent. Note C/C++ has no single equivalent convention — the firmware mixes the student's camelCase with LVGL/TFT_eSPI's snake_case unavoidably, and that's fine as long as the project's own code is internally consistent.*
 
 ---
 
 ## 11. C Concepts Reference (introduced in the multi-page build — study material)
 
-*Things that were new on 26-7-2026. `user_data` especially — flagged as not yet solid; revisit until it sticks, then rewrite this section in your own words (rewritten explanations stick better than read ones).*
+*Written 26-7-2026, extended 1-8-2026. `user_data` and pointer theory were **deliberately parked** on 1-8-2026 — the working model below is enough to read the firmware fluently; the rest can wait until something forces it. When it does click, rewrite this section in your own words (rewritten explanations stick better than read ones).*
+
+**Working model that suffices for now:** a pointer is a *handle to a thing that lives somewhere else*. `btn` is a handle to a button, `def` is a handle to a table row, `page` is a handle to a page description. Pass handles around; read from them with `->`. That covers ~90% of the pointer usage in the firmware, and it's the same instinct that already worked fine for weeks with `lv_obj_t *btn`.
 
 ### `user_data` and `void *` — the coat check
 
@@ -395,37 +472,88 @@ Derived from reviewing the student's own APDS-9960 sensor library (a separate pr
 
 1. **Check-in** (in `buildPage`): the last argument hands LVGL "a thing" to store with this specific button — here, a pointer to this button's own row in the data table.
 2. **Storage:** LVGL keeps it as `void *` — pointer to *something*, type deliberately erased. LVGL is generic and can't know `ButtonDef` exists. The clerk stores coats, bags, umbrellas — same shelf, no questions asked.
-3. **Pick-up** (in the callback): `lv_event_get_user_data(e)` returns the exact same pointer, still as `void *`. The cast `(const ButtonDef *)` is me saying "unwrap this as what I know I checked in."
+3. **Pick-up** (in the callback): `lv_event_get_user_data(e)` returns the exact same pointer, still as `void *`. The cast `(const ButtonDef *)` is you saying "unwrap this as what I know I checked in."
 
 **Why it exists:** `actionButtonEvent` is ONE function shared by ~30 buttons. When it fires it must answer "which button was I?" — the answer is whatever was checked in with that widget. Each button carries a pointer to its own identity. Without this: 30 separate callback functions.
 
-**Full trace of one button's life:** boot → `buildPage` reaches `i=1` of `spotifyButtons` → `def` points at the `"Next" / "SPOTIFY:NEXT"` row → that pointer is checked in with the newly created button. Later: tap → LVGL finds that widget's stored callback + pointer → calls `actionButtonEvent` → cast unwraps → `def->action` → `Serial.println("SPOTIFY:NEXT")`. The table row and the on-screen button are permanently linked by one stored pointer.
+**Full trace of one button's life:** boot → `buildPage` reaches `i=1` of `spotifyButtons` → `def` points at that row → the pointer is checked in with the newly created button. Later: tap → LVGL finds that widget's stored callback + pointer → calls `actionButtonEvent` → cast unwraps → `def->action` → `Serial.println(...)`. The table row and the on-screen button are permanently linked by one stored pointer.
+
+**Alternatives that were considered and why this won:** a function pointer stored in `ButtonDef` instead of an action string would avoid `void *` entirely, but needs ~30 near-identical functions and puts each button's behaviour far from its label. Decisive argument: an action string is *data*, so it can come from a config file pushed from the PC — a function pointer cannot. Protocol v3 (2.3) leans on the same property.
+
+### `*` and `&` are opposites
+
+- `&x` — **take** an address ("address of x")
+- `*p` — **follow** an address ("the value p points at")
+- In a *declaration*, `int *p` — the `*` is part of the type, not an operation
+- `p->field` is shorthand for `(*p).field` — follow the pointer, then take the field
+
+Three places in the firmware, all the same idea:
+```cpp
+buildPage(&pages[i]);                     // & : hand over an address
+const ButtonDef *def = &page->buttons[i]; // & : take an address
+def->action                               // -> : follow an address
+```
+
+**Why a pointer rather than a copy** for `def`: LVGL keeps it for the lifetime of the program. A copy would be a local variable that dies when the loop pass ends, leaving LVGL holding the address of something gone. The `const` tables live in flash and never move, so the address stays valid forever.
+
+**Copies are the default in C; pointers are the opt-in** when a copy can't do the job — because something must outlive the current scope, because a function needs to hand back more than one value (`tft.getTouch(&x, &y)`), or because copying a big struct is wasteful.
 
 ### Structs and arrays of structs
 
-A `struct` bundles variables under one name (`ButtonDef` = label + action + target traveling together). `.` accesses fields on a value, `->` through a pointer — same rule as `data->state` in the touch callback. An array of structs, each `{ ... }` filling one struct's fields in order, is the data table the whole UI is generated from.
+A `struct` bundles variables under one name (`ButtonDef` = label + action + target traveling together). `.` accesses fields on a value, `->` through a pointer — same rule as `data->state` in the touch callback.
+
+**`PageDef`'s `buttons` field is a pointer to an array, not a copy of it** — writing an array's bare name in C gives the address of its first element (which is why it's `spotifyButtons`, not `&spotifyButtons`). `PageDef` is a page's *description*, like a library index card: it doesn't contain the book, it says which shelf. That's also why `buttonCount` must sit right beside it — **a pointer carries no length information**, so a wrong count either hides buttons or walks off the end of the array into garbage. The planned `COUNT(arr)` macro exists to make that impossible.
 
 ### Function pointers
 
-`makeBarButton(..., lv_event_cb_t callback, ...)` — a parameter that holds *which function to call*. These were in use all along without the name: passing `backButtonEvent` to `lv_obj_add_event_cb` passes the function itself as a value. The helper just makes it explicit — the caller picks the callback the same way it picks the x-position.
+`makeBarButton(..., lv_event_cb_t callback, ...)` — a parameter holding *which function to call*. These were in use all along without the name: passing `backButtonEvent` to `lv_obj_add_event_cb` passes the function itself as a value (no parentheses — with them it would be a *call*). The helper just makes it explicit: the caller picks the callback the same way it picks the x-position.
+
+### Callbacks and inverted control flow
+
+`lv_obj_add_event_cb` does nothing visible when called — it *stores an arrangement for later*. That's what makes it feel slippery compared to `lv_obj_set_size`, which acts immediately.
+
+Normally your code calls the library. With callbacks it's reversed: **the library calls you.** `actionButtonEvent` appears in the file but no line anywhere calls it — searching for `actionButtonEvent(` finds only the registration. LVGL does the calling, from inside `lv_timer_handler()`. The same pattern was already in use three times: `lv_display_set_flush_cb`, `lv_indev_set_read_cb`, and now `lv_obj_add_event_cb`.
+
+This is precisely why 4.16 was confusing: registration and invocation are separate things, and you can have a perfectly correct registration while invocation is completely dead.
+
+### LVGL vocabulary (clarified 1-8-2026)
+
+- **`lv_tick_inc()` tells LVGL what time it is; `lv_timer_handler()` gives it permission to act on that.** Both required. 4.16 was having the second without the first.
+- `lv_timer_handler()` is not specifically "check touch and redraw" — it runs *any internal timer now due*. Currently: the input timer (~30ms — calls `my_touch_read`, interprets press/release transitions, fires event callbacks) and the refresh timer (~33ms — repaints dirty areas). With `delay(5)` most calls find nothing due and return immediately; that's normal and cheap, not waste.
+- **"Dirty"** = a screen region no longer matching what should be displayed. Widgets mark *themselves* dirty when something changes (LVGL never diffs the screen); the refresh timer then repaints only those rectangles. Vocabulary chain: **invalidate** (mark) → **dirty area** (rectangle awaiting repaint) → **refresh** (timer processing the list) → **flush** (your callback pushing pixels to hardware). This is also why a ~19KB buffer suffices for a 300KB screen — and why 4.15's `lv_obj_invalidate()` attempt did nothing: the area was already marked, nobody was reading the list.
+- **A screen is just a widget with no parent** — `lv_obj_create(NULL)`, not a special type. `lv_screen_load()` swaps *which tree is active*: nothing is created or destroyed, the whole new screen is marked dirty, and touch now hit-tests against the new tree. The other 8 screens still exist in RAM, complete but unreachable.
+- **Parent/child determines coordinates.** A label created with `btn` as parent centers *inside the button*; the same label created with `scr` as parent would center on the whole screen. Two similarly-named things that differ: `LV_TEXT_ALIGN_CENTER` centers the *lines of text* against each other inside a label; `lv_obj_center()` centers the *label widget* inside its parent.
 
 ### Smaller ones
 
-- `LV_SYMBOL_COPY "\nCopy"` — adjacent string literals are glued into one string at compile time; the symbol macros are themselves just short strings (special font characters), so this yields icon + newline + text in one label.
+- `LV_SYMBOL_COPY "\nCopy"` — adjacent string literals are glued into one string at compile time; the symbol macros are themselves just short strings (special font characters), yielding icon + newline + text in one label.
 - `i % gridCols` / `i / gridCols` — recover column and row from a flat index (the inverse of the old nested row/col loops), feeding into the familiar `start + index * stride`.
 - `sizeof(pages) / sizeof(pages[0])` — element count of an array (total bytes / bytes per element); never goes stale when rows are added.
 - `NULL` as sentinel — one field doing double duty ("no action" *means* "this is a navigation button").
+
+### Python equivalents worth noting (1-8-2026)
+
+- **Truthiness:** `if not line` doesn't ask "does the variable exist" — it asks "is this value *falsy*." Empty bytes `b''`, empty string, empty list, and `0` are all falsy; anything with content is truthy. C has no equivalent for strings/arrays, only for zero. Note `b" "` (a space) is truthy, which is why stripping before checking catches whitespace-only lines too.
+- **Unpacking is strict:** `a, b = some_list` needs exactly two items or it raises `ValueError`. That's the real reason the colon guard exists — `"HELLO".split(":", 1)` succeeds and returns one item; it's the *unpack* that fails.
+- **`print()` returns `None`** — it displays, it doesn't produce a value. `x = print(y)` silently stores nothing.
+- **Slicing:** `keys[:-1]` is everything but the last, `keys[-1]` is the last. Negative indices count from the end — handy because the tapped key is always last regardless of how many modifiers precede it.
+- **`for name in names` walks items directly**, not indices — unlike C's `for (int i = 0; ...)`. `enumerate()` gives both when the position is needed.
 
 ---
 
 ## 12. Immediate Next Steps for Next Session
 
-*(as of 26-7-2026 — old list fully superseded; items 1–5 of the old list are done, old item 6 carried forward as item 3 below, old item 7 carried as item 7, old item 8 satisfied per section 10 note)*
+*(as of 1-8-2026)*
 
-1. **Verify serial output explicitly** — open the monitor, press action buttons, confirm clean `SPOTIFY:NEXT`-style lines appear. Navigation and press-highlights are hardware-verified; the serial lines themselves haven't been explicitly checked off, and the entire companion app builds on them. 30-second check, do it first.
-2. **Spotify 3/3** — fill in real content (labels/icons currently don't match the actions sent), or park the page by setting page 2's `nextPage` back to `-1` until needed.
-3. **Start `companion-app/`** — `spotipy` standalone first: OAuth + play/pause/next working from a plain Python script in a terminal, no ESP32/serial involved yet.
-4. **Serial glue** — `pyserial` reading lines from the ESP32, dispatching on the `CATEGORY:ACTION` protocol (section 2.1). Start with `KEY:` actions via keystroke simulation and `SPOTIFY:` via the spotipy work from step 3.
-5. **Robustness pass on the data tables** (small, do whenever convenient): `COUNT(arr)` macro so `buttonCount` can't be miscounted; optionally auto-link `prevPage`/`nextPage` (and the "n/m" title counts) at boot from a category field, removing the two most error-prone steps of the add-a-page checklist.
-6. **Long-term roadmap item (parked deliberately):** layout editor in the companion app — device stores a layout pushed from the PC over serial, so changing buttons never requires compiling firmware. End-game for maintainability by non-technical users. Explicitly not started until the companion app exists at all.
-7. Consider testing the ESP32-S2 mini again at some point out of curiosity (not urgent, no longer blocking anything) — possibly with a multimeter check of VBUS/GND voltage, which was never actually done.
+Done since the last log: serial output verified end-to-end, full keystroke dispatcher written by the student, protocol v3 decided and applied to the Media page, Win+L limitation found and understood.
+
+1. **`SHELL:` category — both sides.** Python: three lines (`import subprocess`, an `elif category == "SHELL":` branch, `subprocess.Popen(action, shell=True)`; `Popen` rather than `run` so the read loop isn't blocked while the program runs). Firmware: change the System page's two actions from `SYS:LOCK`/`SYS:SLEEP` to `SHELL:rundll32.exe user32.dll,LockWorkStation` and `SHELL:rundll32.exe powrprof.dll,SetSuspendState 0,1,0`. **Test Lock first** — harmless, instantly obvious, and you just log back in. Sleep will genuinely suspend the PC. This handler is also the generic escape hatch that makes arbitrary user-defined buttons possible.
+2. **Finish or park the placeholder pages** — Spotify 3/3 still has copy-paste labels that don't match the actions its buttons send (e.g. a "Queue"-labelled button sends `SPOTIFY:SEEKFWD`); Discord page needs its actions pointed at `KEY:CTRL+SHIFT+M` / `KEY:CTRL+SHIFT+D`, **and Discord's global-hotkey setting must be enabled**, or they only fire while Discord has focus — which defeats the purpose.
+3. **Decide what Spotify still actually needs the API for.** Transport now works via media keys with no OAuth. The API is only needed for Like, seek, queue, and reading now-playing. Consider splitting the Spotify pages accordingly: transport → `KEY:MEDIA_*`, API-only → `SPOTIFY:`.
+4. **Then `spotipy` standalone** — OAuth plus one working API call from a plain script, before wiring it into the dispatcher.
+5. **OBS** (`obsws-python`) — same pattern: standalone first, then a category handler.
+6. **Two-way protocol** (roadmap item 6) — status pushes back to the display (now-playing text, active OBS scene, mute state). This is the first thing needing the PC→ESP32 direction, and it changes the firmware rather than just adding to it.
+7. **Robustness pass on the firmware data tables** (small, whenever): `COUNT(arr)` macro so `buttonCount` can't be miscounted; optionally auto-link `prevPage`/`nextPage` and the "n/m" title counts at boot from a category field, removing the two most error-prone steps of the add-a-page checklist.
+8. **Python tidy-up** (optional): align naming to snake_case, consider auto-detecting the COM port via the CP2102's USB vendor/product ID (`0x10C4`/`0xEA60`) instead of hardcoding COM13, and wrap the port open in a retry so unplugging doesn't kill the script.
+9. **Long-term, parked deliberately:** layout editor in the companion app — device stores a layout pushed from the PC over serial, so changing buttons never requires compiling firmware. End-game for maintainability by non-technical users. Protocol v3 supports this well: an action string is *data* and can come from a config file, where a function pointer could not.
+10. Consider testing the ESP32-S2 mini again out of curiosity (not urgent, no longer blocking anything) — possibly with a multimeter check of VBUS/GND, which was never actually done.
