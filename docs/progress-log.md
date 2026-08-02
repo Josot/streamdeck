@@ -2,6 +2,8 @@
 
 **Purpose of this document:** full context dump for continuing this project in a future chat, and source material for a later portfolio item. Written in enough detail that someone (or an AI) with zero prior context could pick this up and continue.
 
+**Last updated:** 3-8-2026, 01:06
+
 ---
 
 ## 1. Project Goal
@@ -60,19 +62,66 @@ Refinement of v2, prompted by the student asking whether categories should be ap
 |---|---|
 | `KEY:` | simulate keystrokes (incl. media keys) via pynput |
 | `SHELL:` | run a command / launch a program — **planned, nothing built on either side yet** |
-| `SPOTIFY:` | Spotify Web API via spotipy (not implemented yet) |
+| `SPOTIFY:` | Windows SMTC media session (decided 3-8-2026, see 2.5 — was: Spotify Web API via spotipy). Not yet wired into the dispatcher. |
 | `OBS:` | OBS websocket via obsws-python (not implemented yet) |
 
 **Reasoning:** the Python side's only real decision is "how do I execute this?" A Discord mute via keystroke and a Copy via keystroke are the *same operation* — same code path. An app-first prefix would mean either duplicating the keystroke logic per app, or stripping the prefix and delegating, which makes the prefix decorative. Grouping-by-app is a *display* concern that belongs in future config metadata, not in the wire protocol.
 
 **Consequences applied to the firmware:**
 - `MEDIA:PLAYPAUSE` → `KEY:MEDIA_PLAYPAUSE` (and the other five media buttons) — **done, working**
-- `SYS:LOCK`, `SYS:SLEEP` → `SHELL:...` (both need real commands, see 4.18) — **not done yet, System page still sends `SYS:`**
-- `DISCORD:*` → `KEY:CTRL+SHIFT+M` etc., since Discord's mute/deafen are just global hotkeys
+- `SYS:LOCK`, `SYS:SLEEP` → `SHELL:...` (both need real commands, see 4.18) — **done 2-8-2026**
+- `DISCORD:*` → `KEY:CTRL+SHIFT+M` etc., since Discord's mute/deafen are just global hotkeys — **done 2-8-2026**
 - `SPOTIFY:` shrinks to only what media keys can't do (Like, seek, queue, reading now-playing); transport controls can go through `KEY:MEDIA_*` and work with no OAuth at all
 - The `SYS:` and `MEDIA:` categories disappear entirely
 
 **On "infinite" extensibility:** the category set is bounded by what the Python app knows how to do (~4 categories, ever), *not* by what users want on buttons. User freedom comes from (a) `KEY:` and `SHELL:` being generic escape hatches that can trigger essentially anything on the machine, and (b) free-form layout — any action on any button on any page.
+
+> **Migration complete 2-8-2026.** All three consequences above are now applied. No pre-v3 strings (`SYS:`, `MEDIA:`, `DISCORD:`) remain anywhere in the firmware — every button on every page sends either `KEY:` or `SHELL:`, or is a navigation button sending nothing. The wire protocol is fully v3.
+
+### 2.4 Discord: keybinds, not an API (decided 2-8-2026)
+
+Considered properly rather than defaulted into, since every other integration in this project reaches for an API.
+
+**There is no supported Discord API for this.** The public API is for *bots* — server management, messages, slash commands. Muting your own client's microphone is local client state, not a bot operation. The bot API can server-mute *someone else*, which is a moderation action and a completely different thing.
+
+What does exist is Discord's **RPC API** — a local socket with real mute/deafen control and voice-state events, which is what the official Elgato Streamdeck Discord plugin uses. But access needs an approved application with the RPC scope whitelisted (discretionary, aimed at established integrations), and the API is only semi-documented and has changed without notice. So the comparison is not "hacky keybinds vs clean API" — it's "supported user-facing feature vs undocumented endpoint requiring permission."
+
+**The only thing an API would buy is state.** A keybind is fire-and-forget: the device sends `CTRL+SHIFT+M` and has no idea whether the result is muted or unmuted. A button can't display current state, and if the two desync (muted with the mouse instead), the display would lie. RPC gives events, so the display could show truth.
+
+**Decision: keybinds now, revisit RPC only after roadmap item 6 exists.** Two-way serial is needed anyway for now-playing text and OBS scene state; Discord state would then be a fourth consumer of infrastructure built for other reasons, not a new mechanism.
+
+### 2.5 Spotify: Windows SMTC instead of the Web API (decided 3-8-2026)
+
+**The biggest architectural change since protocol v3, and it removes a dependency rather than adding one.**
+
+The original plan (26-7-2026) assumed Spotify meant OAuth and `spotipy`. Checking the current state of the Web API first turned up hard constraints that have tightened since that plan was written:
+
+- **Premium is now required to use the Web API at all** — not just for playback endpoints. Development-mode apps stop working if the owner's Premium lapses.
+- **Development mode is capped at five authenticated users** via a manual allowlist in the developer dashboard, down from 25. Non-allowlisted users get 403s *after* successfully authenticating — auth works, authorisation doesn't, which is a confusing failure mode.
+- Extended quota is closed to individuals (requires a registered business, launched service, 250k+ MAU), so development mode is permanent for a personal project.
+- Each additional user must be added by hand **and** hold their own Premium subscription.
+- Plus the 6-month refresh-token expiry already noted from the earliest planning session, and the February 2026 endpoint removals.
+
+**The alternative found: Windows SMTC** (`GlobalSystemMediaTransportControlsSessionManager`). Windows exposes every media app's session — it's what powers the volume-overlay media popup. Crucially this is **not** media keys: sessions can be enumerated and filtered by `source_app_user_model_id`, so Spotify can be targeted *specifically* rather than broadcasting to whatever the OS thinks is active. That solves the wrong-app problem that made media keys unreliable.
+
+| | SMTC | Spotify Web API |
+|---|---|---|
+| Play/pause, next, previous | ✅ | ✅ |
+| Seek | ✅ (absolute position) | ✅ |
+| Shuffle / repeat | ✅ **and readable as state** | ✅ |
+| Now-playing title + artist | ✅ (one artist) | ✅ (full artists array) |
+| **Like / save track** | ❌ | ✅ |
+| Setup required | `pip install` | dashboard app, OAuth, Premium, allowlist |
+| Ongoing constraints | none | Premium, 5 users, 6-month token |
+| Portability | Windows only | any OS |
+
+**Decision: SMTC for everything; the Web API is now optional and needed only for Like.** Verified on hardware 3-8-2026 — both reading (`try_get_media_properties_async`) and control (`try_skip_next_async`) work against the desktop Spotify client with zero account setup.
+
+**Rejected alternative — intercepting the desktop client.** The idea of sniffing what Spotify sends when "next" is pressed and replaying it: the client talks to Spotify's internal API over TLS with its own credentials, so it would need MITM with a custom root cert, targets undocumented endpoints that change without notice, and sits against the ToS. The old local `SpotifyWebHelper` HTTP server on port 4381 that made this viable years ago was removed by Spotify. Not pursued.
+
+**Consequence for the page layout:** three Spotify pages collapse to one. Everything except Like is available, and "Queue" was never coherent as a button anyway (queue *what*? — the parameter problem from 8.4). Volume stays on the Media page as `KEY:MEDIA_*`; SMTC is a media-session API and has no volume concept.
+
+**Cost accepted:** a second and deeper Windows dependency. `SHELL:` strings could be swapped per-OS in a config file; SMTC would need a completely different implementation on Linux (MPRIS over D-Bus — same idea, different plumbing). Given `rundll32` is already in the companion app, this doesn't lose portability that existed.
 
 ---
 
@@ -241,6 +290,74 @@ This section is important for the portfolio reflection — it documents real deb
   Same reasoning applies to sleep: `rundll32.exe powrprof.dll,SetSuspendState 0,1,0`. Neither is implemented yet — the `SHELL:` handler is still to be written.
 - **Lesson worth keeping:** "the OS refuses to do this on purpose" is a real category of cause, distinct from a bug. Worth suspecting whenever exactly one shortcut fails while everything else works.
 
+> **Addendum 2-8-2026 — CLOSED.** The `SHELL:` handler now exists on both sides and `SHELL:rundll32.exe user32.dll,LockWorkStation` locks the PC correctly from the device. Sleep also works, with the caveat in 4.22.
+
+### 4.19 `SetSuspendState 0,1,0` hibernated instead of sleeping (2-8-2026)
+- The first argument `0` is documented as "sleep, do not hibernate." Windows **ignores it**: if hibernation is enabled on the machine, this call hibernates regardless. Observed directly — the button hibernated the PC.
+- Not a bug in the command string or in the `SHELL:` handler, and no code change fixes it.
+- **Fix applied:** `powercfg /hibernate off` in an elevated prompt. Hibernation now disabled system-wide, so the same command produces real sleep.
+- Sleep vs hibernate, since the distinction mattered here: **sleep** keeps RAM powered (very low draw, ~2s resume, session lost if power is cut); **hibernate** writes RAM to disk and powers off completely (zero draw, slower resume, several GB written to the SSD each time).
+
+### 4.20 Packaged (MSIX/Store) apps cannot be launched by file path (2-8-2026)
+- Wanting a "launch Claude" button, the usual route failed at the first step: right-clicking the Start menu entry opens the app's *settings page*, not a Properties dialog with a Target field. There is no path to copy.
+- Two separate obstacles, and the second is the one that matters:
+  - **Permissions:** `C:\Program Files\WindowsApps` is owned by `TrustedInstaller` and denies read access even to Administrators. Ownership *can* be taken, but Windows Update can reset it.
+  - **App containers (the real blocker):** packaged apps run inside a container whose identity is assigned *at activation* — Windows reads the manifest, sets up the sandbox, and only then starts the process. Launching the exe directly skips all of that, so the app is missing context it expects. Not a permissions problem you can grant your way out of.
+- **Solution — launch by identity, not by path:**
+  ```
+  SHELL:explorer shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude
+  ```
+  `explorer` (the Windows shell process) is what resolves app identities; `shell:AppsFolder` is a shell *namespace* address pointing at a virtual list of installed app identities, not a folder on disk.
+- **How to obtain the ID:** Win+R → `shell:AppsFolder` → right-click the app → Create shortcut → accept "put it on the desktop" → right-click that shortcut → Properties → copy the **Target** field. The desktop shortcut can be deleted immediately afterwards; it was only ever a way to make Windows display the ID.
+- **⚠️ CORRECTION (3-8-2026).** The original version of this entry claimed the hash was "per-install and not derivable", invalid after a reinstall and on other PCs. **That was wrong**, and it was an AI-stated claim accepted without checking at the time. The Publisher ID is a Crockford Base32 encoding of the first 8 bytes of the SHA-256 hash of the publisher string — a deterministic algorithm that is constant on all machines. The string is the same for any package signed by the same certificate, and can be computed without installing the package at all. So `Claude_pzs8sxrjxfjjc!Claude` is **the same on every machine** that installs packaged Claude, and survives reinstalls. It only changes if Anthropic changes its publisher certificate. (Caught by asking "will the IDs always be the same for my device and for other people's devices?" — see section 9.)
+- Note the entry point after `!` varies per package (`!Claude` here, `!App` in many others) — a package names its own entry points.
+- **Generalisable rule:** for packaged apps, **the identity is the address, not the path.** Same instinct as the protocol itself — name the thing you want and let the other side resolve it. Names survive the implementation moving.
+
+### 4.21 Four unrelated meanings of "shell" in one command line (2-8-2026)
+Genuinely confusing while building the Claude button, and worth decoding once:
+```
+SHELL:explorer shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude
+└─1─┘ └───2──┘ └──────────────────3──────────────────────┘
+```
+1. **`SHELL:`** — this project's own protocol category (v3, section 2.3). Python strips it at `split(":", 1)`; nothing downstream ever sees it.
+2. **`explorer`** — the executable to run. Explorer isn't just the file browser; it *is* the Windows shell process, and it's what knows how to activate packaged apps.
+3. **`shell:AppsFolder\...`** — a Microsoft shell-namespace address. The `shell:` prefix means "this is a namespace address, not a file path" (cf. `shell:Downloads`, `shell:RecycleBinFolder`).
+4. Not visible in the line but present in the code: **`shell=True`** in Python's `subprocess.Popen`, meaning "let `cmd` parse this string."
+
+Four different things named "shell", none related to each other. Worth writing down because "why do we do SHELL:explorer shell:AppsFolder" was a real point of confusion, and the answer is that it's three different vocabularies colliding.
+
+### 4.22 Compile error from a stray comma in a `ButtonDef` row (2-8-2026)
+- Written as `{ LV_SYMBOL_EDIT, "\nNotepad", "SHELL:notepad", 0 },` — one extra comma.
+- **Cause:** every label in this codebase relies on **adjacent string literals being glued together at compile time** (`LV_SYMBOL_EDIT "\nNotepad"` is *one* string). A comma between them makes them two separate initialisers, so a 3-field struct receives 4 values: `label` gets the symbol, `action` gets `"\nNotepad"`, `targetPage` gets a string where an `int` belongs.
+- Trivial to fix (delete one character) but worth recording because it is **specific to the label convention this project uses everywhere** — the same typo in a normal struct would look obviously wrong; here it looks almost right.
+
+### 4.23 `winrt` package lineage — most tutorials import a dead package (3-8-2026)
+- Python's WinRT bindings have changed hands three times: Microsoft's monolithic `winrt` (2019–2021) → community `winsdk` (2022–2023) → since September 2023, **modular per-namespace packages**, with the top-level namespace reverted from `winsdk` back to `winrt`.
+- `winsdk` is explicitly deprecated in favour of per-namespace `winrt-Namespace` packages. Any tutorial importing `winsdk.windows.media.control` is on the old lineage — same API, different import path.
+- **Current:** `pip install winrt-Windows.Media.Control`, providing the `winrt.windows.media.control` module. Version 3.2.1 at time of writing.
+
+### 4.24 Cascading `ModuleNotFoundError` from the per-namespace split (3-8-2026)
+Two consecutive failures, both naming modules that appear nowhere in the source:
+- `No module named 'winrt.windows.foundation'` — thrown by `await MediaManager.request_async()`, because it *returns* an `IAsyncOperation`, which lives in the Foundation namespace. Fix: `pip install winrt-Windows.Foundation`.
+- `No module named 'winrt.windows.foundation.collections'` — thrown by `manager.get_sessions()`, because it *returns* a WinRT vector. Fix: `pip install winrt-Windows.Foundation.Collections` (a **separate** package despite the name looking like a subpackage — WinRT treats `Windows.Foundation.Collections` as its own namespace and the packaging mirrors namespaces exactly).
+- **General rule:** each `winrt-*` package contains only its own namespace. If a method *returns* a type from another namespace, that package is needed too, even though the code never names it. Read the missing module out of the traceback and install the matching package.
+- Four packages total were needed for one import line: `winrt-Windows.Media.Control`, `winrt-runtime`, `winrt-Windows.Foundation`, `winrt-Windows.Foundation.Collections`.
+- Useful diagnostic detail: the two errors came from **different line numbers** (line 7 then line 8), which confirmed real progress between them rather than the same failure repeating.
+
+### 4.25 Returned the ID string instead of the session object (3-8-2026)
+```python
+session = lower(session.source_app_user_model_id)   # two bugs in one line
+```
+- **`lower` is a string method, not a builtin** — `x.lower()`, not `lower(x)`.
+- **The loop variable was reassigned to a value derived from itself**, so `session` stopped being the session object and became the string `"spotify.exe"`. `return session` then handed back a string, and the caller's `session.try_get_media_properties_async()` failed because strings have no such method.
+- **This is the same habit as the `KEY:` resolve loop** (`for key in keys: key = function_resolve_keys(key)`), where it was harmless. Here it silently destroyed the object that was actually needed. Fix: give the derived value its own name (`app_id`), keep the object intact.
+- **Mental model that fixes it permanently:** the session is an *object* carrying methods; `source_app_user_model_id` is just a *label* on it. Inspect labels to choose an object — then keep the object, not the label.
+
+### 4.26 `for`/`else` used where plain fall-through was meant (3-8-2026)
+- After moving the `return None` out of the loop body, it was indented as `else:` attached to the `for`. This is **valid Python**, not an error — but `for`/`else` runs the `else` only when the loop completes **without hitting a `break`**. With no `break` present it always runs, so it happened to behave correctly *by accident*.
+- Replaced with an unindented `return None` after the loop. Same behaviour, expressed by control flow rather than by a keyword that means something adjacent — and it won't silently change meaning if a `break` is added later.
+- Worth recording as a near-miss: the instinct about *where* the fallback belonged was right; the construct reached for was wrong.
+
 ---
 
 ## 5. Toolchain Migration: Arduino IDE → PlatformIO
@@ -329,8 +446,9 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 5 | Wire button grid → serial | ✅ **Done (1-8-2026)** — action strings confirmed arriving in the Python app; protocol upgraded to v3 (see 2.3) |
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
 | 7a | Python companion app — keystroke dispatcher | ✅ **Done (1-8-2026)** — reads serial, parses `CATEGORY:ACTION`, resolves arbitrary key combos, executes them. Keybinds page and Media page both confirmed working end-to-end on hardware. **Written by the student**, incrementally. |
-| 7b | `SHELL:` category — Python handler **and** firmware action strings | ⬜ Not started on either side. Needed for Lock PC and Sleep (see 4.18); System page still sends `SYS:`, which nothing handles. |
-| 7c | Python companion app — Spotify (`spotipy`) | 🟡 Partially bypassed — Spotify **transport** (play/pause, next, prev, volume) now works via media keys with no API at all. API still needed for: Like, seek, queue, and reading now-playing for the display. |
+| 7b | `SHELL:` category — Python handler **and** firmware action strings | ✅ **Done (2-8-2026)** — `subprocess.Popen(action, shell=True)` on the Python side, five System-page buttons on the firmware side (Lock, Sleep, Notepad, Claude, VS Code). Lock and Sleep both confirmed on hardware; see 4.19–4.21 for the Windows-specific gotchas. |
+| 7c | Python companion app — Spotify | 🟡 **Approach changed 3-8-2026: SMTC instead of `spotipy`** (see 2.5). Read *and* control both proven against desktop Spotify with zero account setup — transport, seek, shuffle, repeat, now-playing all available. `spotipy` now optional and needed only for a Like button. Category not yet wired into the dispatcher. |
+| 7d | Discord — migrate to `KEY:` global keybinds | ✅ **Done (2-8-2026)** — 6 buttons, all verified on hardware with Discord unfocused. No API needed; see 2.4 for why, and 8.4 for what keybinds can't reach. |
 | 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started |
 | 9 | Polish (icons, config format, case, etc.) | ⬜ Not started — roadmap idea: long-term, a layout editor in the companion app (device stores a layout pushed from the PC) so button changes never require compiling firmware; see section 12 |
 
@@ -346,7 +464,7 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 
 ## 8. Current Working Code (as of this log)
 
-**Full current firmware and companion app: see git page, date 1-8-2026** (`firmware/src/main.cpp`, `companion-app/`). Older versions live in git history — no longer embedded here.
+**Full current firmware and companion app: see git, as of 3-8-2026** (`firmware/src/main.cpp`, `companion-app/`). Older versions live in git history — no longer embedded here. Note the SMTC work of 3-8-2026 currently lives in a standalone `test.py` and is **not yet merged into `main.py`** — see section 12 item 1.
 
 ### 8.1 Firmware architecture (multi-page, data-driven)
 
@@ -361,7 +479,20 @@ All UI content lives in `const` data tables at the top of the file; one generic 
 - **Screens:** all built once at boot into a `screens[]` array; page switches are just `lv_screen_load()`. Fine at this scale (~9 pages); revisit only if the tree grows huge.
 - **Colors** centralized as named constants (`COL_ACTION`, `COL_NAV`, pressed variants, etc.) — retheming the device is a six-line edit.
 - Current page tree: Home → {Keybinds, Discord, Spotify 1/2/3 (chained), OBS, Media, System}.
-- **Partial protocol v3 migration (1-8-2026):** Media page now sends `KEY:MEDIA_*` and works end-to-end. Discord and System pages still send the old `DISCORD:`/`SYS:` strings — migrating them is pending (System needs the `SHELL:` handler first).
+- **Protocol v3 migration COMPLETE (2-8-2026):** Media sends `KEY:MEDIA_*`; System sends `SHELL:` (5 buttons); Discord sends `KEY:` global keybinds (6 buttons). No `SYS:`, `MEDIA:` or `DISCORD:` strings remain. Page tree unchanged; only button counts moved (System 2 → 5, Discord 4 → 6).
+- **Final Discord page (2-8-2026), all six verified on hardware with Discord unfocused:**
+
+  | Button | Action string | Source of the combo |
+  |---|---|---|
+  | Mute | `KEY:CTRL+SHIFT+M` | Discord default |
+  | Deafen | `KEY:CTRL+SHIFT+D` | Discord default |
+  | Hang up | `KEY:CTRL+SHIFT+P` | **self-assigned** |
+  | Screenshare | `KEY:CTRL+SHIFT+I` | **self-assigned** |
+  | Overlay | ``KEY:SHIFT+` `` | Discord default (action is named **Toggle Overlay Lock** in the dropdown) |
+  | Streamer | `KEY:CTRL+SHIFT+S` | **self-assigned** |
+
+  Notes for a future session: the backtick needs no `KEY_NAMES` entry — it's one character, so the resolver's `len(key) == 1` branch passes it to pynput as a plain string. The overlay action is **not** called "Overlay" in Discord's dropdown; there are three separate overlay actions (Toggle Overlay, Toggle Overlay Lock, Activate Overlay Chat) and only the middle one matches Shift+`. Overlay actions are hidden from the dropdown entirely unless the overlay is enabled under Settings → Game Overlay, and the overlay is Windows-only. Also: **Discord disables all keybinds while the Keybinds settings page is visible**, so testing from the device with that page open shows nothing and looks broken. Assign keybinds under Settings → Keybinds rather than under Game Overlay — there is a long-standing bug where recording it on the latter page clears it on navigation. `CTRL+SHIFT+S` collides with Save As in many apps; Discord wins while running, but worth changing if it ever conflicts.
+- ⚠️ **The `pages[]` `buttonCount` was forgotten twice in one session** when adding buttons to System and Discord — the single most repeated mistake in this project so far. This is exactly what the planned `COUNT(arr)` macro prevents, and it has been promoted to next-steps item 1 as a result.
 
 ### 8.2 How to add a page (validated 26-7-2026 by adding Spotify 3/3 independently)
 
@@ -395,6 +526,78 @@ Single script, no classes. Flow:
 **Known assumption (discussed, deliberately kept):** everything except the last key is treated as held. Nothing validates that the held keys are actually modifiers, so `KEY:C+CTRL` would hold "c" and tap Ctrl without complaint. Left permissive on purpose — it's what makes non-standard combos like Discord's `CTRL+N+P` work (Discord does its own key-state tracking rather than using Windows' registered-hotkey API).
 
 **Known limitation:** *sequential* combos (VS Code's `Ctrl+K Ctrl+C`) can't be expressed — the format has no way to say "release everything, then do another combo." Solvable either firmware-side (two `Serial.println` calls, zero Python changes) or Python-side (a `;` separator). Not built; noted as solvable when needed.
+
+**`SHELL:` handler (added 2-8-2026)** — three lines: `import subprocess`, an `elif category == "SHELL":` branch, and `subprocess.Popen(action, shell=True)`.
+
+- **`Popen`, not `run`** — `run()` blocks until the launched program exits, which would freeze the `while True` read loop for as long as (say) Notepad stays open, while button presses pile up unread in the serial buffer. `Popen` starts the process and returns immediately. For a dispatcher, non-blocking is the whole requirement.
+- **`shell=True`** hands the string to `cmd` to parse, rather than treating it as one literal executable name — that's what makes `rundll32.exe user32.dll,LockWorkStation` work as a command *line* with arguments. Standard caveat: it will run anything given to it. Acceptable here because the input arrives from this project's own firmware over a USB cable; would not be acceptable for strings arriving from a network.
+- **⚠️ `shell=True` fails silently.** A typo'd command is accepted by `cmd`, fails to find the program, returns non-zero — and `Popen` never looks at the exit code. So "nothing happened" does **not** distinguish "the branch was never reached" from "the command string is wrong." Debug by printing immediately before the `Popen`.
+- **`split("+")` moved inside the `KEY:` branch** — it was running for every line regardless of category, doing work only `KEY:` ever consumed.
+- **New `else` branch** prints unknown categories instead of dropping them silently. Previously a `SPOTIFY:` press vanished with no trace.
+
+**Dispatch design decision (2-8-2026): keep `if`/`elif`, do NOT build a category dict.** Reasoning, since the instinct to mirror `KEY_NAMES` is natural: `KEY_NAMES` maps **data to data**, has many uniform entries, and grows every time a keybind is added — exactly what a dict is for. Categories map a name to **behaviour**, the set is bounded at ~4 by protocol v3's own logic, and the branch bodies are not uniform (`SHELL:` is one line; `KEY:` is split → resolve → validate → execute; `SPOTIFY:` will need a client built at startup plus its own second-level dispatch). Forcing those into a dict means every value becomes a function with a matching signature — a real structure, not just a tidier `if`. Plan: extract each branch body into its own function (as already done for `function_resolve_keys` / `function_execute_keybinds`), which makes the eventual `HANDLERS = {"KEY": handle_key, ...}` dispatch table a ten-minute change rather than a restructure. Revisit around the fourth category, when `SPOTIFY:` has shown what those handlers actually need to look like.
+
+### 8.4 Limits of the `KEY:` mechanism (mapped 2-8-2026)
+
+Building the Discord page surfaced a clean boundary, and it generalises beyond Discord.
+
+**`KEY:` sends one parameterless event. It can only drive actions that require no decision after the trigger.**
+
+| Works | Doesn't work | Why |
+|---|---|---|
+| Mute, Deafen, Hang up, Overlay lock, Streamer mode | — | parameterless toggles |
+| Screenshare **with a recognised game running** | Screenshare with no game | the target is supplied implicitly by Discord's game detection; without it, a picker appears |
+| Camera **off** | Camera **on** | turning on always prompts for a background choice; turning off needs no decision |
+| — | Push-to-talk | needs **hold state**, not a tap |
+
+- **Camera was dropped from the page** for exactly this reason — a button that only gets you to a dialog is worse than no button, because it implies an action it doesn't complete.
+- **PTT is a different failure:** the protocol sends one event per press, and `function_execute_keybinds` always presses and releases in the same breath. Supporting hold would need `KEYDOWN:` / `KEYUP:` fired from `LV_EVENT_PRESSED` / `LV_EVENT_RELEASED`, with Python holding the key between them. Deliberately not built — a dropped release line would leave a key stuck down forever, which is precisely what the existing validation pass was written to prevent. (A touchscreen is also a poor PTT surface.)
+- **Same family as the sequential-combo gap** in 8.3: the protocol carries one event with no payload, and some actions need more.
+- **This is exactly the class of problem an API fixes.** `OBS:SCENE:1` carries a parameter where a keybind cannot; Discord RPC would similarly let a screenshare target be named. Another entry in the same ledger as 2.4: *keybinds are fine until you need to name a thing.*
+
+### 8.5 `SHELL:` and `KEY:` action strings are machine-specific — and that's the point
+
+Surfaced by asking whether `SHELL:code` works for everyone who installs VS Code. It mostly does (the installer's "add to PATH" checkbox is ticked by default) — but it's a checkbox, and portable/ZIP installs don't get it. Which prompted looking at the whole set:
+
+| Action string | What it depends on |
+|---|---|
+| `SHELL:code` | a PATH entry the VS Code installer *optionally* adds |
+| `SHELL:explorer shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude` | packaged Claude being installed — but the ID itself is **portable**, see correction in 4.20 |
+| `SHELL:start "" "C:\Users\joost\...\Code.exe"` | a specific username and install location |
+| `SHELL:rundll32.exe user32.dll,LockWorkStation` | Windows only |
+| `KEY:CTRL+SHIFT+P` (Hang up), `KEY:CTRL+SHIFT+I` (Screenshare), `KEY:CTRL+SHIFT+S` (Streamer) | **self-assigned Discord keybinds** — these are not Discord defaults; they exist only because they were registered by hand in User Settings → Keybinds on this machine |
+
+**This is not a flaw in the protocol — it is what an escape hatch *is*.** `KEY:` and `SHELL:` get their power from passing arbitrary machine-specific instructions through untouched, and the cost of that power is that they encode assumptions about one machine. `SPOTIFY:NEXT` is universal; `SHELL:code` never will be, and doesn't need to be.
+
+**What it does mean: these strings should not live in compiled firmware long-term.** Right now, changing a keybind or reinstalling Claude requires editing C and reflashing — and handing this device to anyone else would mean recompiling for their machine. This is the strongest concrete argument yet for **roadmap item 9 (config pushed from the PC)**: once actions come from a config file, each machine holds its own strings and the firmware becomes genuinely portable. Protocol v3 already supports this by design — an action string is *data*, and can come from a file where a function pointer could not (see section 11). The gap between "works on my PC" and "works on any PC" is now a concrete, motivated feature rather than an abstract nice-to-have.
+
+**Immediate mitigation until then:** a comment in `systemButtons[]` and `discordButtons[]` flagging that these strings depend on this machine's setup, and noting *how* the Claude app ID was obtained (see 4.20) — not because it expires, but because the retrieval route is non-obvious and would be needed again for any other packaged app.
+
+> **Correction note (3-8-2026):** this section originally listed the Claude app ID as machine-specific. It isn't (see 4.20). The section's argument survives — the username-path, PATH-dependency, Windows-only and self-assigned-keybind rows all still stand — but one of its four examples was wrong and has been fixed rather than quietly dropped.
+
+### 8.6 SMTC / async — mechanics and the integration question (3-8-2026)
+
+**The object chain**, since everything hangs off one session object:
+```
+MediaManager.request_async()          ← await
+  └── manager.get_sessions()          ← no await (instant)
+        └── [session, ...]            one per media app
+              ├── source_app_user_model_id     attribute → "Spotify.exe"
+              ├── try_get_media_properties_async()   ← await → title, artist, album_title
+              ├── get_playback_info()          → is_shuffle_active, auto_repeat_mode, controls
+              ├── get_timeline_properties()    → position, start_time, end_time
+              └── try_skip_next_async() / try_play_async() / try_change_playback_position_async()   ← await
+```
+- **Naming conventions that matter:** `_async` suffix = needs `await`; no suffix = returns immediately. `try_` prefix is a WinRT convention meaning "may legitimately fail" — returns a result rather than raising. Microsoft's docs are C#/PascalCase (`GetCurrentSession`); the Python bindings are auto-generated snake_case (`get_current_session`). **There are no Python API docs** — the bindings are generated, so Microsoft's C# reference is the only source of truth and every name must be translated mentally.
+- **Session selection:** matching `"spotify" in app_id.lower()` rather than `== "Spotify.exe"`, deliberately. Desktop Spotify reports `Spotify.exe`; the Microsoft Store build reports a packaged AUMID (`SpotifyAB.SpotifyMusic_<hash>!Spotify`). Both are stable across machines — the fork is install type, not user. The substring match covers both for one line. (Confirmed on this machine: desktop install, `Spotify.exe`, and it was the only session present at the time.)
+- **`get_current_session()` exists and is simpler** (one call, no loop) but returns whichever session Windows considers active — the same "whatever the OS thinks" behaviour that makes media keys unreliable. The loop is chosen deliberately, not out of ignorance of the simpler option.
+- **Metadata limit accepted:** `artist` holds one artist only; there is no structured list of additional credited artists. Featured artists appear inside the `title` string as text (Spotify's own tagging convention), which is *not* the same as having them as data — extracting them would mean parsing a display string, which is fragile and not worth doing. The Web API's `artists` array is the only real source. **Decided this is fine** — the display use case is one line of text on a 480×320 screen, which would truncate anyway. `subtitle` was empty and `album_title` duplicated the artist on the test track; `title` and `artist` are the only two useful fields.
+
+**The async structural question (open, decide before wiring the category in):** `main.py`'s read loop is ordinary blocking code (`while True` on `connection.readline()`) and cannot `await` anything. Two ways across:
+- **`asyncio.run()` inside the `SPOTIFY:` handler** — one fresh event loop per button press. Mildly wasteful, entirely fine at human press rates, no restructuring. Likely choice for now.
+- **Make the whole read loop async** — cleaner in principle, restructures the main loop.
+
+This becomes a real decision rather than a formality at **roadmap item 6**: showing now-playing on the display means polling SMTC *while* the serial loop reads presses — two things genuinely in flight at once, which is the first point where async earns its keep rather than being a shape imposed by WinRT.
 
 ---
 
@@ -437,6 +640,27 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - **The student challenged the design twice, correctly both times.** First: *"I don't think it is smart to assume everything except the last one being modifiers?"* — a legitimate challenge to an unvalidated assumption, which surfaced where that assumption comes from and what it can't catch. Second, and more consequentially: asked whether categories should be app-first and nestable (`DISCORD:KEY:...`) so users could add arbitrary things later — which directly produced **protocol v3** (section 2.3). The resulting rule (category names the *mechanism*, not the app) is a better design than what the AI had originally specified, and it also happens to be what makes the future config-editor idea viable.
 - **The student empirically corrected the AI.** Told that Windows shortcuts are always "modifiers + exactly one key" and that `CTRL+N+P` therefore couldn't be configured anywhere, they went and tested it in Discord and reported that it *was* recordable. Correct — Discord does its own key-state tracking rather than using Windows' registered-hotkey API. Checking a confident claim against reality instead of accepting it is exactly the habit worth documenting for the reflection.
 - **Naming and comments were actively negotiated, not accepted by default** — `modifiers` was rejected as unclear and replaced with `heldKeys`/`tappedKey`; the student asked what a *decent* comment on `KEY_NAMES` would be rather than accepting a generated one. Consistent with the section 10 conventions being treated as a live standard rather than a one-off decision.
+
+**Added 2-8-2026 (`SHELL:` category + Discord migration session):**
+
+- **The `SHELL:` handler was written by the student**, same incremental pattern as the rest of the companion app: the pieces and the pitfalls were described, the student wrote it. Submitted correct on the first pass, including two improvements suggested in passing that were applied without prompting (moving `split("+")` inside the `KEY:` branch so it doesn't run for every category, and adding the `else` that reports unknown categories). The first Python contribution this project that arrived without a debugging round — a visible difference from the 1-8-2026 session's list of bugs.
+- **The student caught an unsourced claim — third time in this log.** Asked "where did you get camera from?" about a `CTRL+SHIFT+V` default the AI had stated confidently; it was a guess pattern-matched off the real `CTRL+SHIFT+M`/`D` family, not a Discord default. Follows the same shape as the earlier `CTRL+N+P` correction (1-8-2026). At this point it's a **habit rather than an incident**, and it's the single most portfolio-worthy behaviour in this log: the student verified against Discord's own dropdown rather than against the AI's list, and ended the session with six keybinds all confirmed on hardware instead of six assumed from a plausible-sounding table.
+- **Every `SHELL:` command was tested in `cmd` before becoming a button.** Deliberate layer isolation — if the string fails in a terminal it will fail from Python, and testing it there separates "wrong command" from "broken pipeline." Same instinct as the display-before-touch-before-LVGL sequencing from the very start of the project, applied to a completely different domain. This paid off directly: the Claude app ID was proven working in `cmd` before it ever had to survive C string escaping.
+- **A design decision was explicitly delegated, and that was the right call.** After receiving the trade-offs on dict-vs-`if`/`elif` for category dispatch, the student said "make a decision please" rather than continuing to deliberate. Worth recording honestly next to the times they pushed back: recognising when further analysis stops paying — on a reversible, low-stakes structural choice — is its own judgement, not an absence of one. (The decision and its reasoning are in 8.3.)
+- **Portability was raised unprompted** ("is this for everyone who installs VS Code?"), which surfaced that *none* of the `SHELL:` strings and three of the Discord keybinds are portable, and turned roadmap item 9 from an abstract nice-to-have into a motivated feature with a concrete problem behind it (see 8.5). Second time this session the student has thought about users other than themselves — consistent with the 26-7-2026 "how would someone less tech-savvy edit this?" note.
+- **A feature was cut on evidence rather than kept out of sunk cost.** The camera button was tested, found to require picking a background every time, and dropped — with the reasoning stated as "a button that only gets you to a dialog is worse than no button." The generalisation that followed (8.4: `KEY:` can't drive anything needing a decision after the trigger) came *from* that concrete failure rather than from theorising, which is the right direction of travel.
+- **AI-authored code in this session:** none of substance. The firmware changes were string edits to data tables; the Python was the student's. This session sits at the opposite end of the scale from 26-7-2026's prototype rush — worth noting for an honest reflection that the balance shifts by session and by task type, rather than trending monotonically in one direction.
+
+**Added 3-8-2026 (Spotify / SMTC session):**
+
+- **The student caught a false AI claim that had already been written into this log.** Asked "will the IDs always be the same for my device and also for other people's devices?" — which prompted an actual check and revealed the "per-install hash" claim in 4.20 was wrong (the publisher hash is deterministic across all machines). This is the **fourth** unsourced or incorrect AI claim caught in two days, after the `CTRL+N+P` Discord shortcut, the `CTRL+SHIFT+V` camera "default", and an overstatement that a featured artist appearing in the title string meant the metadata "wasn't lost". Worth stating plainly for the portfolio: the corrections came from the student asking a clarifying question about scope, not from the AI self-checking. The log now carries a visible correction rather than a quiet edit, which is the honest way to handle it.
+- **Pushed back on a rationalisation.** When told the featured artist was "right there" inside the title string, replied *"that is just the song name pal"* — correctly rejecting text-inside-a-display-field as equivalent to structured data. The AI conceded and the limitation was recorded accurately in 8.6 instead of being explained away.
+- **Asked "what's the purpose of this?" about async** rather than copying the pattern and moving on. The honest answer — that async buys nothing in a single-task script and is a shape imposed by WinRT rather than a feature being exploited — was more useful than a generic concurrency explanation, and only surfaced because the question was asked directly.
+- **Asked for the same explanation from a different angle** when the first one half-landed, rather than pretending to understand. Then flagged explicitly that async will remain a weak point and asked for it to be revisited as the project continues. Knowing what you don't know, and saying so, is worth recording.
+- **Every step was verified before building on it:** enumerate sessions → read metadata → attempt control. The `try_skip_next_async()` test was the load-bearing one — it decided whether SMTC could replace the Web API for control or only for display. Same layer-by-layer discipline as the display bring-up and the `cmd` testing in the previous session.
+- **Chose the lower-hassle architecture on its merits**, explicitly reasoning that SMTC is "more plug and play" than an approach requiring manual account allowlisting. That instinct turned out to be correct for stronger reasons than were initially visible (Premium gating, 5-user cap, token expiry). Then accepted a real functional loss (Like, full artist list) rather than reintroducing the whole OAuth stack for one button — a proportionate trade rather than completionism.
+- **Two bugs in one line** (4.25) traced back to a habit already flagged in the previous session's code review (reassigning a loop variable to a value derived from itself). Harmless in the `KEY:` loop, destructive here. Worth noting that a style comment made once and not acted on resurfaced as a real bug — an argument for treating those notes as more than preference.
+- **AI-authored code this session:** the enumeration script (pure API boilerplate, given directly) and the skeleton of `function_find_spotify` with TODOs. The student wrote both TODO bodies and hit three bugs doing so, all of which were found by reading the code rather than by running it. Consistent with the established balance: boilerplate handed over, logic left to the student.
 
 ---
 
@@ -543,17 +767,19 @@ This is precisely why 4.16 was confusing: registration and invocation are separa
 
 ## 12. Immediate Next Steps for Next Session
 
-*(as of 1-8-2026)*
+*(as of 3-8-2026, 01:06)*
 
-Done since the last log: serial output verified end-to-end, full keystroke dispatcher written by the student, protocol v3 decided and applied to the Media page, Win+L limitation found and understood.
+**Done this session:** Spotify architecture changed from `spotipy` to Windows SMTC (2.5) — the single biggest dependency reduction in the project. Reading and control both verified against desktop Spotify with no developer account, no Premium gate, no allowlist, no token expiry. Four new hiccups (4.23–4.26), one new architecture subsection (8.6), and **a correction to 4.20 / 8.5** where a previously logged AI claim about packaged-app IDs turned out to be false.
 
-1. **`SHELL:` category — both sides.** Python: three lines (`import subprocess`, an `elif category == "SHELL":` branch, `subprocess.Popen(action, shell=True)`; `Popen` rather than `run` so the read loop isn't blocked while the program runs). Firmware: change the System page's two actions from `SYS:LOCK`/`SYS:SLEEP` to `SHELL:rundll32.exe user32.dll,LockWorkStation` and `SHELL:rundll32.exe powrprof.dll,SetSuspendState 0,1,0`. **Test Lock first** — harmless, instantly obvious, and you just log back in. Sleep will genuinely suspend the PC. This handler is also the generic escape hatch that makes arbitrary user-defined buttons possible.
-2. **Finish or park the placeholder pages** — Spotify 3/3 still has copy-paste labels that don't match the actions its buttons send (e.g. a "Queue"-labelled button sends `SPOTIFY:SEEKFWD`); Discord page needs its actions pointed at `KEY:CTRL+SHIFT+M` / `KEY:CTRL+SHIFT+D`, **and Discord's global-hotkey setting must be enabled**, or they only fire while Discord has focus — which defeats the purpose.
-3. **Decide what Spotify still actually needs the API for.** Transport now works via media keys with no OAuth. The API is only needed for Like, seek, queue, and reading now-playing. Consider splitting the Spotify pages accordingly: transport → `KEY:MEDIA_*`, API-only → `SPOTIFY:`.
-4. **Then `spotipy` standalone** — OAuth plus one working API call from a plain script, before wiring it into the dispatcher.
-5. **OBS** (`obsws-python`) — same pattern: standalone first, then a category handler.
-6. **Two-way protocol** (roadmap item 6) — status pushes back to the display (now-playing text, active OBS scene, mute state). This is the first thing needing the PC→ESP32 direction, and it changes the firmware rather than just adding to it.
-7. **Robustness pass on the firmware data tables** (small, whenever): `COUNT(arr)` macro so `buttonCount` can't be miscounted; optionally auto-link `prevPage`/`nextPage` and the "n/m" title counts at boot from a category field, removing the two most error-prone steps of the add-a-page checklist.
-8. **Python tidy-up** (optional): align naming to snake_case, consider auto-detecting the COM port via the CP2102's USB vendor/product ID (`0x10C4`/`0xEA60`) instead of hardcoding COM13, and wrap the port open in a retry so unplugging doesn't kill the script.
-9. **Long-term, parked deliberately:** layout editor in the companion app — device stores a layout pushed from the PC over serial, so changing buttons never requires compiling firmware. End-game for maintainability by non-technical users. Protocol v3 supports this well: an action string is *data* and can come from a config file, where a function pointer could not.
-10. Consider testing the ESP32-S2 mini again out of curiosity (not urgent, no longer blocking anything) — possibly with a multimeter check of VBUS/GND, which was never actually done.
+1. **Wire `SPOTIFY:` into the dispatcher.** First decide the async crossing (8.6): almost certainly `asyncio.run()` inside the handler for now. Then a second-level dispatch on the action (`PLAYPAUSE`, `NEXT`, `PREV`, `SHUFFLE`, `SEEKFWD`, `SEEKBACK`) — note this is the **fourth category**, which 8.3 named as the point to revisit the dispatch-table question.
+2. **Rebuild the Spotify pages as one page** (2.5). Six buttons, suggested: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Volume stays on the Media page as `KEY:MEDIA_*` — SMTC has no volume concept. This deletes the `PAGE_SPOTIFY2`/`PAGE_SPOTIFY3` chain, the `prevPage`/`nextPage` links and the "n/m" titles, removing the last placeholders from the firmware **and** most of the fiddly part of the page table.
+3. **Seek is more code than it looks.** There is no relative "skip 10 seconds" call — read the current position from `get_timeline_properties()`, add or subtract, then call `try_change_playback_position_async()` with an **absolute** target in **ticks (100-nanosecond units)**, not seconds. Budget for this being the awkward one.
+4. **Handle "Spotify isn't running."** `function_find_spotify` already returns `None`; the dispatcher needs to do something sensible with that rather than crash. Same shape as the existing `if None in resolvedKeys` guard.
+5. **`COUNT(arr)` macro** — still outstanding from the last session, and item 2 above changes button counts again, so it will bite a third time if skipped. `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`.
+6. **Comment the machine-specific strings** (8.5) — reduced in scope now that the Claude app ID turns out to be portable, but the username path, PATH dependency and self-assigned Discord keybinds still warrant a note.
+7. **Decide whether Like earns the Web API.** The only remaining reason to touch `spotipy` at all. It would mean the full OAuth stack, the Premium gate and the 5-user allowlist for **one button**. Defensible either way — but worth deciding deliberately rather than drifting into it.
+8. **OBS** (`obsws-python`) — the remaining integration with no shortcut available. First action string carrying a real parameter (`OBS:SCENE:1`), which is exactly what 8.4 identifies as the thing keybinds can't do.
+9. **Two-way protocol** (roadmap item 6) — now much better motivated: SMTC already exposes `title`, `artist`, `is_shuffle_active` and `auto_repeat_mode`, so the data for a now-playing display and for real state on the shuffle/repeat buttons is **already available and proven readable**. Only the PC→ESP32 direction is missing. This is also where async stops being ceremony and starts earning its keep (8.6).
+10. **Async remains a known weak point** — flagged explicitly by the student at the end of this session. Worth building the intuition incrementally as items 1 and 9 come up, rather than in one lump.
+11. **Python tidy-up** (optional): extract the `KEY:` branch body into `handle_key()`; align naming to snake_case; auto-detect the COM port via the CP2102's USB VID/PID (`0x10C4`/`0xEA60`) instead of hardcoding COM13; wrap the port open in a retry so unplugging doesn't kill the script.
+12. **Parked, unchanged:** PTT / hold-state would need `KEYDOWN:`/`KEYUP:` (8.4); sequential combos would need a `;` separator (8.3); Discord RPC only after item 9 exists (2.4); the ESP32-S2 mini could be retested, ideally with the VBUS/GND multimeter check that was never actually done.

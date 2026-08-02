@@ -82,5 +82,8 @@ while True:
     elif category == "SHELL":
         subprocess.Popen(action, shell=True) # perform action, use Popen because it is NOT blocking
 
+    elif category == "SPOTIFY":
+        pass
+
     else:
         print(f"cannot find the given category: {category}")
