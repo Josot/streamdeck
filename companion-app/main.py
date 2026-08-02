@@ -1,5 +1,6 @@
-import serial
-from pynput.keyboard import Controller, Key
+import serial # used to read out serial
+import subprocess # Used for shell catagory
+from pynput.keyboard import Controller, Key # used to simulate keyboard presses
 
 keyboard = Controller()
 
@@ -49,6 +50,8 @@ def function_execute_keybinds(resolvedKeys):
         keyboard.release(key)
 
 while True:
+
+    # Read the line and save it it for futher use
     line = connection.readline() # read the serial print on baudrate set in connection
     line = line.decode("utf-8", errors="replace").strip() # strip away /r/n
     if not line: # it prints '' in between keystrokes due to timeout from serial connection which is false therefore continue to not flood terminal.
@@ -58,16 +61,26 @@ while True:
 
     if ":" not in line: # if there is no ":" in the line only 1 item will exist and it will fail split category action
         continue
-    category, action = line.split(":", 1) # 1 cut due to some names being example: OBS:SCENE:1
-    keys = action.split("+") # split it into keys for example WIN+SHIFT+S becomes [0] WIN [1] SHIFT [2] S
+
+    category, action = line.split(":", 1) # 1 cut due to some names being example: OBS:SCENE:1 or SHELL:C:\Windows\notepad.exe
+
 
     if category == "KEY":
+        keys = action.split("+") # split it into keys for example WIN+SHIFT+S becomes [0] WIN [1] SHIFT [2] S
         resolvedKeys = [] # put in all keys that went through function_resolve_keys
+
         for key in keys:
             key = function_resolve_keys(key)
             resolvedKeys.append(key)
+
         if None in resolvedKeys: # if function_resolve_keys couldn't resolve the given 
             print(f"Unknown key in: {line}")
             continue
 
         function_execute_keybinds(resolvedKeys)
+
+    elif category == "SHELL":
+        subprocess.Popen(action, shell=True) # perform action, use Popen because it is NOT blocking
+
+    else:
+        print(f"cannot find the given category: {category}")

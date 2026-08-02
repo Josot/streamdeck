@@ -77,10 +77,12 @@ static const ButtonDef keyButtons[] = {
 };
 
 static const ButtonDef discordButtons[] = {
-  { LV_SYMBOL_MUTE       "\nMute",    "DISCORD:MUTE",    0 },
-  { LV_SYMBOL_VOLUME_MID "\nDeafen",  "DISCORD:DEAFEN",  0 },
-  { LV_SYMBOL_CALL       "\nPTT",     "DISCORD:PTT",     0 },
-  { LV_SYMBOL_EYE_OPEN   "\nOverlay", "DISCORD:OVERLAY", 0 },
+  { LV_SYMBOL_MUTE       "\nMute",     "KEY:CTRL+SHIFT+M", 0 }, 
+  { LV_SYMBOL_VOLUME_MID "\nDeafen",   "KEY:CTRL+SHIFT+D", 0 }, 
+  { LV_SYMBOL_CLOSE      "\nHang up",  "KEY:CTRL+SHIFT+P", 0 }, 
+  { LV_SYMBOL_VIDEO      "\nScreenshare","KEY:CTRL+SHIFT+I", 0 }, 
+  { LV_SYMBOL_EYE_OPEN   "\nOverlay",  "KEY:SHIFT+`",      0 },   
+  { LV_SYMBOL_EYE_CLOSE  "\nStreamer", "KEY:CTRL+SHIFT+S", 0 }, 
 };
 
 static const ButtonDef spotifyButtons[] = {
@@ -129,21 +131,24 @@ static const ButtonDef mediaButtons[] = {
 };
 
 static const ButtonDef systemButtons[] = {
-  { LV_SYMBOL_CLOSE "\nLock PC", "KEY:WIN+L",  0 },
-  { LV_SYMBOL_POWER "\nSleep",   "SYS:SLEEP", 0 },
+  { LV_SYMBOL_CLOSE "\nLock PC", "SHELL:rundll32.exe user32.dll,LockWorkStation",  0 },
+  { LV_SYMBOL_POWER "\nSleep",   "SHELL:rundll32.exe powrprof.dll,SetSuspendState 0,1,0", 0 },
+  { LV_SYMBOL_FILE "\nNotepad", "SHELL:notepad", 0},
+  { LV_SYMBOL_BARS "\nClaude", "SHELL:explorer shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude", 0 }, // Claude only available in Appsfolder which is locked therefore get app ID
+  { LV_SYMBOL_EDIT "\nVS Code", "SHELL:code", 0 },
 };
 
 // title, buttons, count, parent, prevPage, nextPage
 static const PageDef pages[] = {
   { "Home",        homeButtons,     6, -1,        -1,           -1 },
   { "Keybinds",    keyButtons,      6, PAGE_HOME, -1,           -1 },
-  { "Discord",     discordButtons,  4, PAGE_HOME, -1,           -1 },
+  { "Discord",     discordButtons,  6, PAGE_HOME, -1,           -1 },
   { "Spotify 1/3", spotifyButtons,  6, PAGE_HOME, -1,           PAGE_SPOTIFY2 },
   { "Spotify 2/3", spotify2Buttons, 6, PAGE_HOME, PAGE_SPOTIFY, PAGE_SPOTIFY3},
   {"Spotify 3/3", spotify3Buttons, 6, PAGE_HOME, PAGE_SPOTIFY2, -1},
   { "OBS",         obsButtons,      6, PAGE_HOME, -1,           -1 },
   { "Media",       mediaButtons,    6, PAGE_HOME, -1,           -1 },
-  { "System",      systemButtons,   2, PAGE_HOME, -1,           -1 },
+  { "System",      systemButtons,   5, PAGE_HOME, -1,           -1 },
 };
 
 static const int pageCount = sizeof(pages) / sizeof(pages[0]);
