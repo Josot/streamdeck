@@ -8,9 +8,7 @@ async def function_find_spotify():
     for session in manager.get_sessions():
         app_id = session.source_app_user_model_id.lower()
         if "spotify" in app_id:
-            print(app_id)
             return session
-
     return None
 
 async def function_show_now_playing():
@@ -20,15 +18,35 @@ async def function_show_now_playing():
         return
 
     props = await session.try_get_media_properties_async()
-    print("title:        ", props.title)
-    print("artist:       ", props.artist)
-    print("album_title:  ", props.album_title)
-    print("album_artist: ", props.album_artist)
-    print("subtitle:     ", props.subtitle)
-    print("track_number: ", props.track_number)
-    print("Genre:        ", props.genres)
-    await session.try_skip_next_async()
 
-    
+    metadata = {
+        "title": props.title,
+        "artist": props.artist,
+        "album_title": props.album_title,
+        "album_artist": props.album_artist,
+        "subtitle": props.subtitle,
+        "track_number": props.track_number,
+        "genres": list(props.genres),
+    }
+
+    for name, value in metadata.items():
+        print(f"{name:14}{value}")
+
+    controls = session.get_playback_info().controls
+    capabilities = {
+        name: getattr(controls, name)
+        for name in dir(controls)
+        if name.startswith("is_")
+    }
+
+    print()
+    for name, supported in capabilities.items():
+        print(f"{name:32}{supported}")
+
+    # --- test 1: fast forward / rewind ---
+    print()
+    print("fast_forward:", await session.try_fast_forward_async())
+    await asyncio.sleep(2)
+    print("rewind:      ", await session.try_rewind_async())
 
 asyncio.run(function_show_now_playing())
