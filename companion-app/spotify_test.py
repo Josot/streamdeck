@@ -4,6 +4,7 @@ from winrt.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
 )
 import datetime
+import time
 
 async def function_find_spotify():
     manager = await MediaManager.request_async()
@@ -32,6 +33,13 @@ def function_get_time_position(session): # not async since it is instant
     print(f"elapsed:   {elapsed:.2f}")
     print(f"corrected: {corrected:.2f}")
     return corrected
+
+async def function_set_shuffle(session, shuffle_request):
+    return await session.try_change_shuffle_active_async(shuffle_request)
+
+async def function_toggle_shuffle(session): # change a shuffle on into off and vice versa
+    info = session.get_playback_info()
+    return await function_set_shuffle(session, not info.is_shuffle_active) # swap em around with set shuffle function
 
 async def function_try_seek(session, offset_seconds):
     position = function_get_time_position(session)
@@ -63,10 +71,13 @@ async def function_show_now_playing():
     for name, value in metadata.items():
         print(f"{name:14}{value}")
 
-    # --- test 2: getting exact times ---
-    print(function_get_time_position(session))
-
 
 session = asyncio.run(function_find_spotify())
-asyncio.run(function_try_seek(session, -200))
+# asyncio.run(function_try_seek(session, -200))
 # asyncio.run(function_show_now_playing())
+
+# --- test 3: shuffle on and off ---
+
+asyncio.run(function_set_shuffle(session, False))
+time.sleep(1)
+asyncio.run(function_toggle_shuffle(session))
