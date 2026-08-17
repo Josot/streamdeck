@@ -2,7 +2,7 @@
 
 **Purpose of this document:** full context dump for continuing this project in a future chat, and source material for a later portfolio item. Written in enough detail that someone (or an AI) with zero prior context could pick this up and continue.
 
-**Last updated:** 3-8-2026, 01:06
+**Last updated:** 17-8-2026
 
 ---
 
@@ -33,6 +33,8 @@ Two architectures were considered:
 - PC → ESP32: `TRACK:...`, `SCENE:...`, `MUTE:1` (status pushes, for showing now-playing track / highlighting active OBS scene / mic-mute indicator on screen)
 - OBS pushes events instantly (websocket). Spotify has no push mechanism — PC app must poll `currently-playing` periodically (a few seconds' lag is fine and expected).
 
+> **Correction (17-8-2026):** the "Spotify has no push mechanism" claim was true of the **Web API**, not of Spotify as such. SMTC exposes three change events on the session object — `MediaPropertiesChanged`, `PlaybackInfoChanged`, `TimelinePropertiesChanged` — so track changes, play/pause state and shuffle state can all arrive as callbacks rather than being polled for. This materially changes roadmap item 6: a now-playing display can be event-driven. Second time a stated constraint has turned out to be Web-API-specific rather than Spotify-specific (cf. 2.5). Events remain **unexplored** — noted, not tested.
+
 ### 2.1 Serial protocol v2 (26-7-2026) — actions, not button numbers
 
 Decided during the multi-page firmware build, superseding the `BTN:n` plan: buttons send **semantic action strings**, not positions. One line per press:
@@ -62,7 +64,7 @@ Refinement of v2, prompted by the student asking whether categories should be ap
 |---|---|
 | `KEY:` | simulate keystrokes (incl. media keys) via pynput |
 | `SHELL:` | run a command / launch a program — **planned, nothing built on either side yet** |
-| `SPOTIFY:` | Windows SMTC media session (decided 3-8-2026, see 2.5 — was: Spotify Web API via spotipy). Not yet wired into the dispatcher. |
+| `SPOTIFY:` | Windows SMTC media session (decided 3-8-2026, see 2.5 — was: Spotify Web API via spotipy). **Wired into the dispatcher 17-8-2026.** |
 | `OBS:` | OBS websocket via obsws-python (not implemented yet) |
 
 **Reasoning:** the Python side's only real decision is "how do I execute this?" A Discord mute via keystroke and a Copy via keystroke are the *same operation* — same code path. An app-first prefix would mean either duplicating the keystroke logic per app, or stripping the prefix and delegating, which makes the prefix decorative. Grouping-by-app is a *display* concern that belongs in future config metadata, not in the wire protocol.
@@ -77,6 +79,8 @@ Refinement of v2, prompted by the student asking whether categories should be ap
 **On "infinite" extensibility:** the category set is bounded by what the Python app knows how to do (~4 categories, ever), *not* by what users want on buttons. User freedom comes from (a) `KEY:` and `SHELL:` being generic escape hatches that can trigger essentially anything on the machine, and (b) free-form layout — any action on any button on any page.
 
 > **Migration complete 2-8-2026.** All three consequences above are now applied. No pre-v3 strings (`SYS:`, `MEDIA:`, `DISCORD:`) remain anywhere in the firmware — every button on every page sends either `KEY:` or `SHELL:`, or is a navigation button sending nothing. The wire protocol is fully v3.
+
+> **Correction (17-8-2026) — the fourth bullet was never applied, and is now deliberately reversed.** The Spotify page still sends `SPOTIFY:PLAYPAUSE` / `NEXT` / `PREV`; transport never moved to `KEY:MEDIA_*`. Checked by grepping `spotifyButtons[]` rather than trusting the log — worth doing, because the log claimed the migration was complete while listing a consequence that hadn't happened. **And the bullet is now wrong on its merits:** it existed to avoid OAuth for things media keys handle anyway, but media keys broadcast to whatever Windows thinks is active, which was the known unreliability. SMTC targets Spotify by `source_app_user_model_id` at zero setup cost, so transport belongs under `SPOTIFY:` — which is what 2.5's six-button page already assumed. The Media page keeps its `KEY:MEDIA_*` buttons as the deliberate "whatever is playing" alternative.
 
 ### 2.4 Discord: keybinds, not an API (decided 2-8-2026)
 
@@ -122,6 +126,26 @@ The original plan (26-7-2026) assumed Spotify meant OAuth and `spotipy`. Checkin
 **Consequence for the page layout:** three Spotify pages collapse to one. Everything except Like is available, and "Queue" was never coherent as a button anyway (queue *what*? — the parameter problem from 8.4). Volume stays on the Media page as `KEY:MEDIA_*`; SMTC is a media-session API and has no volume concept.
 
 **Cost accepted:** a second and deeper Windows dependency. `SHELL:` strings could be swapped per-OS in a config file; SMTC would need a completely different implementation on Linux (MPRIS over D-Bus — same idea, different plumbing). Given `rundll32` is already in the companion app, this doesn't lose portability that existed.
+
+### 2.6 Spotify volume: the Windows audio mixer (`pycaw`) — decided 17-8-2026, **not yet built**
+
+SMTC is a *media session* API and has no volume concept at all (2.5). The obvious remaining route was the Web API's volume endpoint — Premium, OAuth, allowlist, expiring token, for one number.
+
+**Third option found: Windows' per-application audio mixer.** Every process gets its own volume node — the thing you see when you right-click the speaker icon. `pycaw` binds it: `AudioUtilities.GetAllSessions()`, match `session.Process.name()` against `"Spotify.exe"` (same find-by-name idea as the SMTC lookup), then `ISimpleAudioVolume` with `GetMasterVolume()` / `SetMasterVolume(float 0.0–1.0, None)`.
+
+**Investigated and rejected: Last.fm and other third-party services.** Last.fm is scrobbling and metadata only — it has no playback control of anything. More generally, **no third party can offer "Spotify control" as a service**, because control requires the user's own OAuth token against Spotify's API; anything claiming otherwise is a wrapper that still makes you authenticate, with the same Premium gate plus a middleman. The 2.5 constraints are Spotify's, not an artefact of the client chosen.
+
+**The resulting volume ledger:**
+
+| Volume | Mechanism | Status |
+|---|---|---|
+| System volume | `KEY:MEDIA_VOLUP` / `VOLDOWN` / `MUTE` | ✅ working |
+| Spotify's share of system audio | `pycaw` per-app mixer | decided, not built |
+| Spotify's *own internal* slider | Web API only | not pursued |
+
+**Differences from SMTC worth knowing before building it:** `pycaw` is **synchronous** — no coroutines, no `asyncio.run()`, making it the simplest integration in the project. It's COM rather than WinRT, so the naming is different but the docs situation is *better* (real Python examples exist, versus SMTC's translate-from-C# situation). Everything is read-modify-write; there is no toggle. And it has a different notion of "Spotify": SMTC finds a *media session*, `pycaw` finds an *audio session*, and these can disagree — Spotify paused for a while may have the former and not the latter.
+
+**Cost accepted:** the mixer changes the app's output level, not Spotify's own slider, so the Spotify UI won't move. Functionally identical for listening; occasionally confusing when looking at the app. Third Windows-specific dependency, consistent with the trade already accepted in 2.5.
 
 ---
 
@@ -358,6 +382,59 @@ session = lower(session.source_app_user_model_id)   # two bugs in one line
 - Replaced with an unindented `return None` after the loop. Same behaviour, expressed by control flow rather than by a keyword that means something adjacent — and it won't silently change meaning if a `break` is added later.
 - Worth recording as a near-miss: the instinct about *where* the fallback belonged was right; the construct reached for was wrong.
 
+### 4.27 Calling a coroutine without awaiting it — twice in one session (17-8-2026)
+
+The single most repeated mistake of this session, and the one that best illustrates the async model.
+
+- **First instance:** `session = function_find_spotify()` inside the `SPOTIFY:` branch of `main.py`'s blocking `while True` loop. Calling an `async def` **does not run its body** — it builds a coroutine object and hands it back, unstarted. So `session` held a coroutine, which is not `None`, so the `if session is None` guard passed unconditionally: Spotify could have been closed entirely and the check would not have noticed.
+- **Second instance:** `return session.try_change_shuffle_active_async(...)` inside `function_toggle_shuffle` — missing `await` on the return line, so the SMTC call was constructed and never made.
+- **The symptom to recognise:** `RuntimeWarning: coroutine 'x' was never awaited`. That warning *is* this bug.
+- **Why the first one couldn't be fixed with a one-word patch:** the `while True` loop is ordinary sync code and cannot `await` at all. Wrapping just the lookup in `asyncio.run()` would have worked for one line and failed on the next, since the actual playback call is *also* a coroutine. The fix was structural — move the whole branch body into `async def function_handle_spotify(action)` and have the loop call `asyncio.run(function_handle_spotify(action))` once. All awaits then live inside one event loop per press.
+- **Also caught in the test harness:** `asyncio.wait(1)` used where a sleep was meant. `asyncio.wait` takes a set of awaitables, not an int, and is itself a coroutine — so it did nothing, twice over. `await asyncio.sleep(1)` inside a coroutine, `time.sleep(1)` outside one.
+
+### 4.28 Reading an attribute off the wrong object (17-8-2026)
+
+`props.position` → `AttributeError`. `props` is `...SessionMediaProperties` (title, artist, album); position lives on `...SessionTimelineProperties`, from a separate `session.get_timeline_properties()` call. Also hit in the same family: `get_playback_info().controls` written without a receiver, as though it were a free function.
+
+**Useful habit that came out of it:** the `AttributeError` message names the class it failed on. Reading that class name tells you whether you have the *wrong attribute* or the *wrong object* — here, unambiguously the second.
+
+### 4.29 Comparing a WinRT enum to a string fails silently (17-8-2026)
+
+`if info.playback_status == "PLAYING":` compiles, runs, raises nothing, and is **always false**. The drift correction therefore never applied and `corrected` silently equalled `reported` — no error, no clue, just a feature quietly not working.
+
+- **Diagnosis path:** `print(info.playback_status)` was unhelpful (printed the enum *class*, indistinguishable from `type()` output). `repr()` gave the real member: `<...PlaybackStatus.PLAYING: 4>`, and `list(type(status))` gave the full set — CLOSED 0, OPENED 1, CHANGING 2, STOPPED 3, PLAYING 4, PAUSED 5.
+- **Lesson worth keeping: reach for `repr()` when a `print()` looks uninformative.** `print` uses the human-readable form, which for enums can be lossy.
+- **Fix:** import the enum and compare against a member:
+  ```python
+  from winrt.windows.media.control import (
+      GlobalSystemMediaTransportControlsSessionManager as MediaManager,
+      GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+  )
+  ...
+  if info.playback_status == PlaybackStatus.PLAYING:
+  ```
+- **Why the import is necessary at all, in plain terms:** the status is not text, it's one of six fixed values, and the name `PLAYING` only exists inside the enum class. Without importing it there is no way to *name* the value you want to compare against — and comparing to a lookalike string is exactly the silent failure above. (The `as PlaybackStatus` alias exists because WinRT type names are absurdly long; see 8.7.)
+- **Deliberately `== PLAYING` and not `!= PAUSED`:** six states exist and only one means the position is advancing. `!=` would wrongly apply the correction during CHANGING and OPENED.
+
+### 4.30 Naive vs timezone-aware datetimes (17-8-2026)
+
+`datetime.now() - timeline.last_updated_time` → `TypeError: can't subtract offset-naive and offset-aware datetimes`.
+
+- **Naive** = a datetime with no timezone attached; **aware** = the same instant plus an offset. Python refuses to mix them rather than guessing, because the gap between "14:32" and "14:32 UTC" could be anything.
+- WinRT always returns **aware UTC** (`+00:00`), on every machine, regardless of the user's location — it's a property of the API, not of where the PC is. So the fix is one argument: `datetime.datetime.now(datetime.timezone.utc)`.
+- Checked explicitly during the session whether the machine simply *was* on UTC — it wasn't (CEST, UTC+2). Had the mismatch gone unnoticed, the arithmetic would have been off by two hours and every seek would have jumped to the end of the track.
+- **Keep everything in UTC rather than sidestepping via local time:** matching both sides as naive local would work until a DST boundary.
+
+### 4.31 A test harness that would break on import (17-8-2026)
+
+`session = asyncio.run(function_find_spotify())` sat at module level in `spotify_test.py`. Harmless in a scratch script, and three separate objections applied at different times:
+
+1. **Dead code** while `function_show_now_playing` did its own lookup and never read it.
+2. **Two event loops** — session found in one `asyncio.run()`, used in another. Probably fine; WinRT objects carry threading context, and "probably" is how intermittent failures start.
+3. **The one that actually matters: top-level code runs on import.** The moment this file becomes `spotify_functions.py` and `main.py` imports it, importing the module would spin up an event loop and go looking for Spotify — and cache a session that dies when Spotify restarts.
+
+**Rule adopted:** test harnesses go inside an `async def` called once at the bottom, never at module level. Same shape the real handler needs anyway.
+
 ---
 
 ## 5. Toolchain Migration: Arduino IDE → PlatformIO
@@ -447,7 +524,8 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
 | 7a | Python companion app — keystroke dispatcher | ✅ **Done (1-8-2026)** — reads serial, parses `CATEGORY:ACTION`, resolves arbitrary key combos, executes them. Keybinds page and Media page both confirmed working end-to-end on hardware. **Written by the student**, incrementally. |
 | 7b | `SHELL:` category — Python handler **and** firmware action strings | ✅ **Done (2-8-2026)** — `subprocess.Popen(action, shell=True)` on the Python side, five System-page buttons on the firmware side (Lock, Sleep, Notepad, Claude, VS Code). Lock and Sleep both confirmed on hardware; see 4.19–4.21 for the Windows-specific gotchas. |
-| 7c | Python companion app — Spotify | 🟡 **Approach changed 3-8-2026: SMTC instead of `spotipy`** (see 2.5). Read *and* control both proven against desktop Spotify with zero account setup — transport, seek, shuffle, repeat, now-playing all available. `spotipy` now optional and needed only for a Like button. Category not yet wired into the dispatcher. |
+| 7c | Python companion app — Spotify | 🟡 **Mostly done (17-8-2026).** `SPOTIFY:` wired into `main.py` via `asyncio.run()` in the handler; **Play/Pause, Next, Previous all verified on hardware.** Seek (both directions, configurable offset), shuffle set/toggle, and a drift-corrected position read are **written and tested in `spotify_test.py`** but not yet merged or dispatched. Remaining: repeat, stop/play/pause, now-playing as a function, the module split, and the second-level dispatch table. |
+| 7e | Spotify volume via `pycaw` (per-app audio mixer) | ⬜ Not started — decided 17-8-2026, see 2.6. Sync, no auth, simplest integration left. |
 | 7d | Discord — migrate to `KEY:` global keybinds | ✅ **Done (2-8-2026)** — 6 buttons, all verified on hardware with Discord unfocused. No API needed; see 2.4 for why, and 8.4 for what keybinds can't reach. |
 | 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started |
 | 9 | Polish (icons, config format, case, etc.) | ⬜ Not started — roadmap idea: long-term, a layout editor in the companion app (device stores a layout pushed from the PC) so button changes never require compiling firmware; see section 12 |
@@ -458,13 +536,19 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 - ✅ Git version control set up (command line), repo published to GitHub
 - ✅ LVGL 9.5.0 installed and wired to TFT_eSPI (flush + touch read callbacks), DRAM budget fixed
 - ✅ `lv_tick_inc()` wired in `loop()` — mandatory for LVGL timers on Arduino (see 4.16)
-- ✅ Python environment working (`pyserial` + `pynput`); full touchscreen → ESP32 → USB → Python → real keystroke pipeline proven on hardware
+- ✅ Python environment working (`pyserial` + `pynput` + the four `winrt-*` packages from 4.24); full touchscreen → ESP32 → USB → Python → real keystroke pipeline proven on hardware, and as of 17-8-2026 the same pipeline through to real Spotify playback control
 
 ---
 
 ## 8. Current Working Code (as of this log)
 
-**Full current firmware and companion app: see git, as of 3-8-2026** (`firmware/src/main.cpp`, `companion-app/`). Older versions live in git history — no longer embedded here. Note the SMTC work of 3-8-2026 currently lives in a standalone `test.py` and is **not yet merged into `main.py`** — see section 12 item 1.
+**Full current firmware and companion app: see git, as of 17-8-2026** (`firmware/src/main.cpp`, `companion-app/`). Older versions live in git history — no longer embedded here.
+
+**Where the Spotify code currently lives (17-8-2026), because it is split across two files:**
+- `main.py` — has the `SPOTIFY:` branch, `function_find_spotify`, `function_handle_spotify`, and transport (PLAYPAUSE / NEXT / PREV). Working on hardware, committed.
+- `spotify_test.py` — has `function_get_time_position`, `function_try_seek`, `function_set_shuffle`, `function_toggle_shuffle`. All tested and working, **none of it dispatched yet**. Merging these into `spotify_functions.py` is next-steps item 1.
+
+The firmware is unchanged since 3-8-2026 — no reflash was needed for any of today's work, because the Spotify page was already sending the right action strings.
 
 ### 8.1 Firmware architecture (multi-page, data-driven)
 
@@ -593,11 +677,71 @@ MediaManager.request_async()          ← await
 - **`get_current_session()` exists and is simpler** (one call, no loop) but returns whichever session Windows considers active — the same "whatever the OS thinks" behaviour that makes media keys unreliable. The loop is chosen deliberately, not out of ignorance of the simpler option.
 - **Metadata limit accepted:** `artist` holds one artist only; there is no structured list of additional credited artists. Featured artists appear inside the `title` string as text (Spotify's own tagging convention), which is *not* the same as having them as data — extracting them would mean parsing a display string, which is fragile and not worth doing. The Web API's `artists` array is the only real source. **Decided this is fine** — the display use case is one line of text on a 480×320 screen, which would truncate anyway. `subtitle` was empty and `album_title` duplicated the artist on the test track; `title` and `artist` are the only two useful fields.
 
-**The async structural question (open, decide before wiring the category in):** `main.py`'s read loop is ordinary blocking code (`while True` on `connection.readline()`) and cannot `await` anything. Two ways across:
-- **`asyncio.run()` inside the `SPOTIFY:` handler** — one fresh event loop per button press. Mildly wasteful, entirely fine at human press rates, no restructuring. Likely choice for now.
-- **Make the whole read loop async** — cleaner in principle, restructures the main loop.
+**The async structural question — RESOLVED 17-8-2026: `asyncio.run()` inside the handler.** As predicted. But the reasoning that settled it is worth keeping, because it is stronger than "the log said so":
 
-This becomes a real decision rather than a formality at **roadmap item 6**: showing now-playing on the display means polling SMTC *while* the serial loop reads presses — two things genuinely in flight at once, which is the first point where async earns its keep rather than being a shape imposed by WinRT.
+**Making the read loop async would buy nothing today, because `connection.readline()` is blocking.** Wrapping the loop in `async def` and sprinkling `await`s does not change that — `readline()` is a synchronous call that sits there for up to a full second holding the event loop hostage. Async does not make blocking calls non-blocking; it only lets *other awaiting tasks* run while one task is genuinely suspended at an `await`. With one task and a blocking read, the restructure delivers all the ceremony and none of the concurrency.
+
+Doing it properly would need `asyncio.to_thread()` around the read, or `pyserial-asyncio`, or a reader thread feeding a queue — a real restructure with a dependency question attached, not the ten-minute syntax change it looks like. **Worth knowing before roadmap item 6, where "make it async" will sound cheap and won't be.**
+
+This still becomes a real decision at **roadmap item 6**: showing now-playing on the display means SMTC state arriving *while* the serial loop reads presses — two things genuinely in flight, which is the first point where async earns its keep rather than being a shape imposed by WinRT. Note the correction at the top of section 2 makes this *easier* than assumed: SMTC has change events, so this may be "react to a callback" rather than "poll on a timer."
+
+### 8.7 SMTC capability surface and timeline mechanics (mapped 17-8-2026)
+
+**`get_playback_info().controls` is the definitive answer to "what will Spotify actually honour"** — a set of `is_*_enabled` flags, enumerable with `dir()`. Printed once against desktop Spotify:
+
+| Honoured | Not honoured |
+|---|---|
+| play_pause_toggle, next, previous, play, pause, stop, fast_forward, rewind, playback_position, shuffle, repeat | playback_rate, record, channel_up, channel_down |
+
+**⚠️ These flags are live state, not a static capability table.** `is_play_enabled` read `False` purely because the track was playing at that moment; it would flip when paused. Only the genuinely-unsupported ones (rate, record, channel) read `False` regardless of state. **Do not cache this at startup and trust it.** Its real future use is roadmap item 6 — greying out a control the current app can't do, rather than showing a button that lies.
+
+**Full SMTC surface, with what it's worth to this project:**
+
+| Call | Spotify | Status here |
+|---|---|---|
+| `try_toggle_play_pause_async()` | ✅ | ✅ working on hardware |
+| `try_skip_next_async()` / `try_skip_previous_async()` | ✅ | ✅ working on hardware |
+| `try_change_playback_position_async(ticks)` | ✅ | ✅ written & tested (seek) |
+| `try_change_shuffle_active_async(bool)` | ✅ | ✅ written & tested |
+| `try_change_auto_repeat_mode_async(enum)` | ✅ | not written — three-state enum |
+| `try_play_async()` / `try_pause_async()` / `try_stop_async()` | ✅ | not written — trivial |
+| `try_fast_forward_async()` / `try_rewind_async()` | ✅ | **tested, then abandoned — see below** |
+| `try_get_media_properties_async()` | ✅ | proven; `title` + `artist` the only useful fields (see 8.6) |
+| `get_timeline_properties()` | ✅ | ✅ position read written & tested |
+| Like / save track | ❌ | Web API only |
+| Volume | ❌ | not a media-session concept — see 2.6 |
+
+**Fast-forward / rewind: tested, work, and deliberately not used.** Both are honoured by Spotify and both jump a **fixed 5 seconds**. That briefly looked like free seek with no tick arithmetic — but there is no argument to pass, so a user-configurable offset is impossible. Rejected in favour of real seek, on the same "give the user the freedom" reasoning as 2.3. (They remain available as fixed-jump actions if ever wanted.)
+
+**Timeline mechanics — the actual difficulty of seek, which was never the arithmetic:**
+
+- **Read and write use different units.** `timeline.position` and `end_time` come back as Python **`timedelta`** objects (`.total_seconds()` → float), but `try_change_playback_position_async` takes an **int in ticks (100-nanosecond units)**. `int(seconds * 10_000_000)`. That asymmetry is the whole awkwardness; discovering it cost one `print(type(...))`.
+- **The reported position is stale while playing, by 0.5 to 4 seconds.** Windows does not stream position — Spotify pushes a timeline update periodically and the OS hands back the last one it got. **Staleness and instantness are the same fact:** `get_timeline_properties()` needs no `await` precisely because it reads a cache rather than asking Spotify.
+- **`last_updated_time` exists to fix this.** `position + (now_utc − last_updated_time)` gives the true position. Verified in practice; up to 4s of drift makes this worth doing even for a 10-second seek, where the error would otherwise be up to 40%.
+- **The correction is only valid while PLAYING.** On pause, Spotify pushes one final accurate position, then `last_updated_time` freezes while the wall clock keeps moving — so `elapsed` starts measuring *how long you have been paused* and the correction adds time that never passed. Confirmed empirically by pausing for 30s and watching `corrected` run away from `reported`. Hence the `PlaybackStatus.PLAYING` branch (4.29).
+
+**Seek edge cases — tested rather than guarded against.** A clamp (`max(0, min(target, end))`) was drafted defensively and then **deliberately not kept**, because testing showed Spotify already handles both ends: seeking before 0 lands at the track start, and seeking past the end **advances to the next track**. The latter is a design decision left as-is: it is Spotify's own behaviour, predictable, and preventing it would mean unexplained defensive code. Recorded here so a future reader knows the absence of a clamp is a decision, not an oversight.
+
+> **⚠️ FLAG FOR ROADMAP ITEM 6 (raised deliberately 17-8-2026, do not lose):** any track position shown on the display is **approximate**, not exact — 0.5–4s of drift, reduced but not eliminated by the correction. **This must be communicated to the user in the interface** rather than presented as an exact readout. A progress bar that lags visibly looks broken in a way a seek button never does, which is also where the correction stops being optional and starts being required.
+
+### 8.8 `spotify_functions.py` and parameterised actions (decided 17-8-2026, **not yet built**)
+
+**Rejected: one file per protocol category** (`key.py`, `shell.py`, `spotify.py`, `obs.py`). It mirrors the wire format rather than the code, and the shape doesn't survive contact: `shell.py` would be one line, `obs.py` would be empty (nothing written yet, shape unknown), while `spotify.py` is already the largest thing in the app. Two of four would be real, two ceremony — the same failure mode as forcing category dispatch into a dict (8.3).
+
+**Decided: extract each branch body into a function inside `main.py` first** (`handle_key`, `handle_shell`, `handle_spotify`) — already next-steps item 11 from the previous session, and the prerequisite for *any* split, since a file split is just moving functions that already exist. Then `spotify_functions.py` splits out on its own merits: it brings its own dependency (`winrt`), its own async model, and session-finding logic nothing else touches. `shell.py` probably never earns it.
+
+**Naming trap noted:** Python resolves local files before installed packages, so a file named `serial.py` would shadow pyserial with a confusing error. Not a problem with the names chosen, but `obs.py` sits close to a package that will be installed later.
+
+**Scope decision — write functions for everything an action string can express, not just what's on the page.** Prompted by the student's point that a user's config layout may want shuffle-on, repeat-off, or stop even if none of those go on the author's own six buttons. The reachability gate is *"can an action string express it,"* not *"is it on my page."* This is a genuine extension of 2.3's user-freedom argument into the Python surface, where 2.3 had located that freedom only in `KEY:` and `SHELL:`.
+
+**Consequence — the protocol now carries parameters, ahead of OBS.** `SPOTIFY:SEEKFWD:10` uses the same `split(":", 1)` idiom one level down, exactly as `OBS:SCENE:1` always implied. Decisions taken:
+- **`SEEKFWD:n` / `SEEKBACK:n`, not `SEEK:±n`** — two named actions, always positive. Negative numbers are easy to mistype in a config file someone else is editing.
+- **`SHUFFLE` / `SHUFFLE:ON` / `SHUFFLE:OFF`** — three action strings over two functions. `function_set_shuffle(session, bool)` talks to SMTC; `function_toggle_shuffle(session)` reads state and delegates to it. Explicit on/off is not redundant with toggle: a "start my session" macro that sets shuffle **on** is idempotent, where a toggle in the same macro is a coin flip. Same reason `try_play_async` exists alongside the toggle.
+- **`playback_rate` is the one parameterised call not worth writing** — Spotify doesn't honour it (8.7).
+
+**Session lifetime — settled deliberately.** The session is looked up **once per button press**, in the handler, and passed down as the first parameter to every function. Not cached at startup: a session object belongs to a *running instance* of Spotify, so a cached one dies on restart with failures that look like broken code rather than a restarted app. Not looked up per function either: the `None` guard would be duplicated a dozen times, and `function_try_seek` → `function_get_time_position` would do two lookups and could in principle get two different sessions.
+
+**Dispatch: use a dict this time.** 8.3 said to revisit the dispatch-table question at the fourth category — this is it, and the answer differs *by level*. Top-level categories stay `if`/`elif` (four ever, non-uniform bodies). The Spotify second level is a dozen-plus actions mapping name → function with uniform signatures — data-to-data, exactly what `KEY_NAMES` is. Requires a uniform signature (`func(session, params=None)`) so the no-argument ones accept and ignore `params`; slightly ugly, and it keeps the table a table.
 
 ---
 
@@ -661,6 +805,21 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - **Chose the lower-hassle architecture on its merits**, explicitly reasoning that SMTC is "more plug and play" than an approach requiring manual account allowlisting. That instinct turned out to be correct for stronger reasons than were initially visible (Premium gating, 5-user cap, token expiry). Then accepted a real functional loss (Like, full artist list) rather than reintroducing the whole OAuth stack for one button — a proportionate trade rather than completionism.
 - **Two bugs in one line** (4.25) traced back to a habit already flagged in the previous session's code review (reassigning a loop variable to a value derived from itself). Harmless in the `KEY:` loop, destructive here. Worth noting that a style comment made once and not acted on resurfaced as a real bug — an argument for treating those notes as more than preference.
 - **AI-authored code this session:** the enumeration script (pure API boilerplate, given directly) and the skeleton of `function_find_spotify` with TODOs. The student wrote both TODO bodies and hit three bugs doing so, all of which were found by reading the code rather than by running it. Consistent with the established balance: boilerplate handed over, logic left to the student.
+
+**Added 17-8-2026 (Spotify dispatcher + seek + shuffle session):**
+
+- **The session opened by the student comparing two AI suggestions against each other.** A previous chat's proposed plan was pasted in next to this one's, and the student asked which was right. They differed on ordering: wire the Python handler first (because the firmware already sends `SPOTIFY:PLAYPAUSE`, so three buttons light up with no reflash) versus rebuild the pages first (fix the contract, then build against it). The second argument was weaker and was conceded — the action names were never genuinely uncertain, and `SHELL:` had already set the Python-first precedent. **Treating two AI outputs as competing claims to be adjudicated, rather than as instructions, is the natural extension of the log's existing habit of checking AI claims against reality.**
+- **That adjudication immediately produced a caught error — in the *log itself*.** Verifying the disputed premise meant grepping `spotifyButtons[]` rather than trusting section 2.3, which revealed that 2.3's "transport moves to `KEY:MEDIA_*`" bullet had **never been applied** despite the section carrying a "migration complete" note. Fifth caught claim in the log's history, and the first found *in the log* rather than in an AI message. Worth stating for the reflection: a project log is a source that also needs checking, and its confident summary lines are exactly where drift hides.
+- **Debugging by reading error messages properly, not by guessing.** Two `AttributeError`s were resolved by noticing that the message names the *class* it failed on (4.28) — telling the student they had the wrong object rather than the wrong attribute. Separately, when a `print()` of an enum was uninformative, `repr()` and `list(type(x))` were used to see the real member and the full value set (4.29), rather than trying comparisons until one worked.
+- **A silent failure was caught by noticing a number that didn't change.** The `== "PLAYING"` bug produced no error at all; it surfaced because `corrected` printed identically to `reported` when it should have been ~4 seconds higher. This is the same instinct as the 4.15 flush-logging investigation — instrument the thing that *should* change, then check whether it did.
+- **A defensive clamp was rejected on evidence.** The AI supplied `max(0, min(target, end))` for seek without knowing whether Spotify needed it; the student's response was "let's just see what happens" and tested all four edges. Spotify handles both itself, so the clamp was dropped. **This is the better instinct, and it was the student's:** unexplained defensive code is code nobody dares remove later. Same shape as the 2-8-2026 camera decision — cut on evidence, not on theory. (Both edge behaviours are now recorded in 8.7 so the *absence* of a clamp reads as a decision.)
+- **A feature was rejected for the right reason after being proven to work.** `try_fast_forward_async` / `try_rewind_async` both work and jump a fixed 5 seconds, which would have made seek nearly free. The student chose real seek anyway, explicitly for user-configurable offsets — accepting more work to preserve a freedom no current button needs. Consistent with 2.3's reasoning applied to a new surface.
+- **The scope of the Python API surface was argued for and won.** Told to write only functions reachable from the current button set, the student pushed back: a config-driven layout means the reachable set is whatever a *user* can type, not what the author put on a page. Correct, and it changed the plan (8.8). Third time in this log the student has thought about other people's use of the device rather than their own.
+- **Async: asked "shall we make main.py async?" and got a *no* with reasons.** The answer — that an async read loop buys nothing while `readline()` blocks, and doing it properly needs `to_thread`/`pyserial-asyncio`/a reader thread — landed better than the previous session's abstract explanations because it was attached to a concrete decision the student had proposed. **The declared weak point from 3-8-2026 is measurably less weak:** the coroutine-never-awaited bug was hit twice (4.27) but recognised the second time, and by the end of the session the student was correctly distinguishing "needs `await`" from "returns immediately" by reading the `_async` suffix.
+- **Questioned a suggestion instead of applying it:** asked why `function_get_time_position` shouldn't be `async` ("could it not have to wait to receive the timeline data?"). A fair challenge that produced the useful answer — the call is instant *because* it reads a cache, which is the same fact as the position being stale. Two things that had looked unrelated turned out to be one.
+- **Asked for a line-by-line explanation and then asked again with real numbers** when the abstract version half-landed — the same "explain it from a different angle" move as 3-8-2026, now applied without hesitation. Also checked a hypothesis about the timezone offset ("is there a chance I'm just in UTC right now?") rather than accepting the explanation on authority; it was wrong, but checking was right.
+- **Pushed back on verbosity**, twice: asked for a shorter form when an answer ran long, and asked directly what the `COUNT(arr)` problem actually *was* after it had been recommended four times without ever being explained. Both fair; the second in particular caught a real failure to justify a recommendation.
+- **AI-authored code this session:** the drift-correction block and the seek/shuffle function bodies were given as sketches after the mechanics were explained, in the established boilerplate-handed-over pattern. Every one of them was typed out by the student with modifications, and the resulting bugs (4.27–4.29) were all in the student's integration of them — which is where the learning is. The `function_get_time_position` structure in particular went through four review rounds before it ran.
 
 ---
 
@@ -763,23 +922,41 @@ This is precisely why 4.16 was confusing: registration and invocation are separa
 - **Slicing:** `keys[:-1]` is everything but the last, `keys[-1]` is the last. Negative indices count from the end — handy because the tapped key is always last regardless of how many modifiers precede it.
 - **`for name in names` walks items directly**, not indices — unlike C's `for (int i = 0; ...)`. `enumerate()` gives both when the position is needed.
 
+### Async, and other Python worth noting (17-8-2026)
+
+- **Calling an `async def` does not run it.** It builds a coroutine object, unstarted. Something must `await` it, or an event loop must drive it via `asyncio.run()`. This is the single most useful async fact so far — it explains 4.27 in both instances, and the `RuntimeWarning: coroutine was never awaited` message *is* the symptom.
+- **`async` does not make blocking calls non-blocking.** It only lets other awaiting tasks run while one task is genuinely suspended *at an `await`*. A `while True` loop around a blocking `readline()` gains nothing from being made async — with one task and a blocking read, there is nothing to interleave with.
+- **The `_async` suffix is a contract, not decoration.** WinRT marks anything that may take time; no suffix means "returns immediately, do not await." Practical test: if a call needs awaiting and doesn't get it, the next attribute access fails, because you're holding a coroutine rather than data.
+- **`asyncio.sleep` vs `time.sleep`:** the first is a coroutine and needs `await` (and only works inside one); the second blocks the whole thread. `asyncio.wait` is neither — it takes a set of awaitables, not a duration.
+- **`repr()` vs `print()`:** `print` shows the human-readable form, which for enums can be lossy enough to be useless. `repr()` shows the unambiguous one. `list(type(x))` on an enum member lists every member of its class. Reach for both when a print looks uninformative.
+- **Naive vs aware datetimes** — see 4.30. Python refuses to subtract one from the other rather than guessing.
+- **`timedelta` is a duration, not a point in time.** Two datetimes subtracted give one; `.total_seconds()` converts it to a float. `timeline.position` is already a `timedelta` (duration from track start), so it needs the conversion but not the subtraction.
+- **f-string format specs:** `{x:.2f}` is fixed-point to two decimals; `{name:14}` pads to 14 characters (which is what lines values into a column). The colon starts the formatting instructions in both cases.
+- **Dict comprehension** — `{k: f(k) for k in items if cond}`, the key/value sibling of a list comprehension. Used to turn the `dir()`-plus-`getattr()` capability scan into an actual queryable dict rather than a print loop.
+- **`dir(obj)`** lists an object's attribute names, and `getattr(obj, name)` fetches one by name — the pair that makes it possible to enumerate an API surface you don't have docs for. Directly useful here, since the WinRT bindings have no Python documentation (8.6).
+- **Local files shadow installed packages.** A file named `serial.py` in the project folder would be imported instead of pyserial. Worth remembering when naming modules after the thing they wrap.
+- **Top-level code runs on import**, which is why a test harness at module level is fine in a script and a bug in a module (4.31).
+
 ---
 
 ## 12. Immediate Next Steps for Next Session
 
-*(as of 3-8-2026, 01:06)*
+*(as of 17-8-2026)*
 
-**Done this session:** Spotify architecture changed from `spotipy` to Windows SMTC (2.5) — the single biggest dependency reduction in the project. Reading and control both verified against desktop Spotify with no developer account, no Premium gate, no allowlist, no token expiry. Four new hiccups (4.23–4.26), one new architecture subsection (8.6), and **a correction to 4.20 / 8.5** where a previously logged AI claim about packaged-app IDs turned out to be false.
+**Done this session:** the `SPOTIFY:` category went from "decided" to **working on hardware** — Play/Pause, Next and Previous all controlled from the touchscreen, with no reflash needed and no account setup of any kind. Seek (drift-corrected, configurable offset) and shuffle (set + toggle) are written and tested but not yet dispatched. Five new hiccups (4.27–4.31), two new architecture subsections (2.6 pycaw, 8.8 module + parameterised actions), one new mechanics section (8.7), the open async question in 8.6 **closed**, and **two corrections to section 2** — the "Spotify has no push mechanism" claim, and a "migration complete" note covering a bullet that was never applied.
 
-1. **Wire `SPOTIFY:` into the dispatcher.** First decide the async crossing (8.6): almost certainly `asyncio.run()` inside the handler for now. Then a second-level dispatch on the action (`PLAYPAUSE`, `NEXT`, `PREV`, `SHUFFLE`, `SEEKFWD`, `SEEKBACK`) — note this is the **fourth category**, which 8.3 named as the point to revisit the dispatch-table question.
-2. **Rebuild the Spotify pages as one page** (2.5). Six buttons, suggested: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Volume stays on the Media page as `KEY:MEDIA_*` — SMTC has no volume concept. This deletes the `PAGE_SPOTIFY2`/`PAGE_SPOTIFY3` chain, the `prevPage`/`nextPage` links and the "n/m" titles, removing the last placeholders from the firmware **and** most of the fiddly part of the page table.
-3. **Seek is more code than it looks.** There is no relative "skip 10 seconds" call — read the current position from `get_timeline_properties()`, add or subtract, then call `try_change_playback_position_async()` with an **absolute** target in **ticks (100-nanosecond units)**, not seconds. Budget for this being the awkward one.
-4. **Handle "Spotify isn't running."** `function_find_spotify` already returns `None`; the dispatcher needs to do something sensible with that rather than crash. Same shape as the existing `if None in resolvedKeys` guard.
-5. **`COUNT(arr)` macro** — still outstanding from the last session, and item 2 above changes button counts again, so it will bite a third time if skipped. `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`.
-6. **Comment the machine-specific strings** (8.5) — reduced in scope now that the Claude app ID turns out to be portable, but the username path, PATH dependency and self-assigned Discord keybinds still warrant a note.
-7. **Decide whether Like earns the Web API.** The only remaining reason to touch `spotipy` at all. It would mean the full OAuth stack, the Premium gate and the 5-user allowlist for **one button**. Defensible either way — but worth deciding deliberately rather than drifting into it.
-8. **OBS** (`obsws-python`) — the remaining integration with no shortcut available. First action string carrying a real parameter (`OBS:SCENE:1`), which is exactly what 8.4 identifies as the thing keybinds can't do.
-9. **Two-way protocol** (roadmap item 6) — now much better motivated: SMTC already exposes `title`, `artist`, `is_shuffle_active` and `auto_repeat_mode`, so the data for a now-playing display and for real state on the shuffle/repeat buttons is **already available and proven readable**. Only the PC→ESP32 direction is missing. This is also where async stops being ceremony and starts earning its keep (8.6).
-10. **Async remains a known weak point** — flagged explicitly by the student at the end of this session. Worth building the intuition incrementally as items 1 and 9 come up, rather than in one lump.
-11. **Python tidy-up** (optional): extract the `KEY:` branch body into `handle_key()`; align naming to snake_case; auto-detect the COM port via the CP2102's USB VID/PID (`0x10C4`/`0xEA60`) instead of hardcoding COM13; wrap the port open in a retry so unplugging doesn't kill the script.
-12. **Parked, unchanged:** PTT / hold-state would need `KEYDOWN:`/`KEYUP:` (8.4); sequential combos would need a `;` separator (8.3); Discord RPC only after item 9 exists (2.4); the ESP32-S2 mini could be retested, ideally with the VBUS/GND multimeter check that was never actually done.
+**Commits made:** transport working (three buttons), then seek, then shuffle. The firmware is untouched since 3-8-2026.
+
+1. **Merge into `spotify_functions.py`** (8.8). `function_get_time_position`, `function_try_seek`, `function_set_shuffle`, `function_toggle_shuffle` currently live in `spotify_test.py` and are dispatched from nowhere — the device cannot reach any of them. Prerequisite is extracting `main.py`'s branch bodies into `handle_key` / `handle_shell` / `handle_spotify` first, since a file split is just moving functions that already exist. **Do not carry the module-level `asyncio.run()` test harness across (4.31).**
+2. **Second-level dispatch dict** for Spotify actions, with the uniform `func(session, params=None)` signature (8.8). This is what makes `SEEKFWD:10` and `SHUFFLE:ON` reachable, and it's the decision 8.3 deferred to the fourth category.
+3. **Finish the function set while the shape is fresh** — repeat (three-state; needs its own enum import and the same `repr()` check as 4.29, since guessing the comparison has already cost two rounds), stop / play / pause (trivial), and `get_now_playing()` (proven in `test.py`, unused until item 8, but it should live somewhere real).
+4. **`COUNT(arr)` macro** — `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`. Outstanding for three sessions now. The reasoning was finally written down this session and is worth restating: the hand-typed count in `pages[]` is an unchecked promise about an array, and `buildPage` trusts it completely because a decayed pointer carries no length. **Too low** hides buttons (harmless, happened twice); **too high** reads past the end of the array and dereferences garbage as a string pointer (crash or reboot loop). Item 5 below is the first time this project will *shrink* an array, which is the dangerous direction. Note the macro only works where the real array type is in scope — `COUNT(page->buttons)` would compile and be wrong.
+5. **Rebuild the Spotify pages as one page** (2.5). Six buttons: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Deletes `PAGE_SPOTIFY2`/`PAGE_SPOTIFY3`, the `prevPage`/`nextPage` chain, the "n/m" titles and the last placeholder page. **Currently three of the six buttons on Spotify page 1 print "action not recognised"** (`VOLUP`, `VOLDOWN`, `LIKE` — SMTC has none of them), so the page is half-lying about what it can do. ⚠️ `COUNT` fixes the counts but **not** the enum/`pages[]` ordering trap from 8.2 — deleting two rows from the middle shifts every later page index, so the enum must be edited in lockstep.
+6. **Spotify volume via `pycaw`** (2.6) — genuinely the easiest thing left: synchronous, no auth, real Python docs, and the find-by-process-name pattern is already familiar from `function_find_spotify`. Good palate cleanser. Watch for Spotify holding multiple audio sessions (helper processes), and for the app having *no* audio session when it has been silent a while.
+7. **Decide whether Like earns the Web API.** Unchanged and still open. The full OAuth stack, Premium gate and 5-user allowlist for **one button**. Everything else Spotify-related is now done without it, which arguably makes the answer easier.
+8. **Two-way protocol** (roadmap item 6) — now better motivated *and* cheaper than the log previously assumed, because SMTC has **change events** (correction at the top of section 2), so this may be "react to a callback" rather than "poll on a timer." ⚠️ **Carry the drift flag from 8.7 into the interface work:** any position shown on the display is approximate (0.5–4s), and that must be communicated to the user rather than presented as exact. This is also where the async read-loop question stops being cosmetic — and note it is *not* the ten-minute change it looks like (8.6).
+9. **OBS** (`obsws-python`) — the last integration with no shortcut available. Note the parameterised-action work done this session means `OBS:SCENE:1` no longer needs a protocol decision; the second-level split idiom already exists.
+10. **Async is still the declared weak point, but visibly less so.** The coroutine-never-awaited bug was hit twice this session and recognised the second time. Keep taking it in small doses through items 2 and 8 rather than in one lump.
+11. **Python tidy-up** (optional, unchanged): align naming to snake_case (currently mixed, and the new functions follow the existing `function_` prefix deliberately — do the realignment as its own commit, not halfway); auto-detect the COM port via the CP2102's USB VID/PID (`0x10C4`/`0xEA60`) instead of hardcoding COM13; wrap the port open in a retry so unplugging doesn't kill the script. Also: strip the remaining diagnostic prints from `function_get_time_position` and `function_try_seek` before they fire on every button press.
+12. **Comment the machine-specific strings** (8.5) — still outstanding. Username path, PATH dependency and self-assigned Discord keybinds.
+13. **Parked, unchanged:** PTT / hold-state would need `KEYDOWN:`/`KEYUP:` (8.4); sequential combos would need a `;` separator (8.3); Discord RPC only after item 8 exists (2.4); the ESP32-S2 mini could be retested, ideally with the VBUS/GND multimeter check that was never actually done.
