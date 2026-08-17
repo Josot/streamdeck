@@ -1,7 +1,9 @@
 import asyncio
 from winrt.windows.media.control import (
-    GlobalSystemMediaTransportControlsSessionManager as MediaManager
+    GlobalSystemMediaTransportControlsSessionManager as MediaManager,
+    GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
 )
+import datetime
 
 async def function_find_spotify():
     manager = await MediaManager.request_async()
@@ -10,6 +12,35 @@ async def function_find_spotify():
         if "spotify" in app_id:
             return session
     return None
+
+def function_get_time_position(session): # not async since it is instant
+    timeline = session.get_timeline_properties()
+    
+    now = datetime.datetime.now(datetime.timezone.utc) # work with UTC to make sure everything matches in all regions
+    elapsed = (now - timeline.last_updated_time).total_seconds() # returns a UTC therefore work with UTC
+    
+    reported = timeline.position.total_seconds()
+
+    info = session.get_playback_info()
+    if info.playback_status == PlaybackStatus.PLAYING: # if music is playing reported + elapsed works but if it isn't you run into the issue of reported being accurate + elapsed
+        corrected = reported + elapsed
+    else:
+        corrected = reported
+
+
+    print(f"reported:  {reported:.2f}")
+    print(f"elapsed:   {elapsed:.2f}")
+    print(f"corrected: {corrected:.2f}")
+    return corrected
+
+async def function_try_seek(session, offset_seconds):
+    position = function_get_time_position(session)
+    target = position + offset_seconds
+
+    print(f"seeking to target: {target:2f}")
+
+    ticks = int(target * 10_000_000)
+    return await session.try_change_playback_position_async(ticks)
 
 async def function_show_now_playing():
     session = await function_find_spotify()
@@ -32,21 +63,10 @@ async def function_show_now_playing():
     for name, value in metadata.items():
         print(f"{name:14}{value}")
 
-    controls = session.get_playback_info().controls
-    capabilities = {
-        name: getattr(controls, name)
-        for name in dir(controls)
-        if name.startswith("is_")
-    }
+    # --- test 2: getting exact times ---
+    print(function_get_time_position(session))
 
-    print()
-    for name, supported in capabilities.items():
-        print(f"{name:32}{supported}")
 
-    # --- test 1: fast forward / rewind ---
-    print()
-    print("fast_forward:", await session.try_fast_forward_async())
-    await asyncio.sleep(2)
-    print("rewind:      ", await session.try_rewind_async())
-
-asyncio.run(function_show_now_playing())
+session = asyncio.run(function_find_spotify())
+asyncio.run(function_try_seek(session, -200))
+# asyncio.run(function_show_now_playing())
