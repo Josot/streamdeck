@@ -4,7 +4,6 @@ from winrt.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
 )
 import datetime
-import time
 
 async def function_find_spotify():
     manager = await MediaManager.request_async()
@@ -28,10 +27,6 @@ def function_get_time_position(session): # not async since it is instant
     else:
         corrected = reported
 
-
-    print(f"reported:  {reported:.2f}")
-    print(f"elapsed:   {elapsed:.2f}")
-    print(f"corrected: {corrected:.2f}")
     return corrected
 
 async def function_set_shuffle(session, shuffle_request):
@@ -41,6 +36,16 @@ async def function_toggle_shuffle(session): # change a shuffle on into off and v
     info = session.get_playback_info()
     return await function_set_shuffle(session, not info.is_shuffle_active) # swap em around with set shuffle function
 
+async def function_shuffle_wrapper(session, params=None):
+    if params is None: return await function_toggle_shuffle(session)
+    elif params.upper() == "ON": return await function_set_shuffle(session, True)
+    elif params.upper() == "OFF": return await function_set_shuffle(session, False)
+    else: 
+        print(f'Cannot find param: {params} for shuffle')
+        return
+
+# this function is called by function_seek_wrapper_forward and function_seek_wrapper_backward. This is because of the negative
+# floats being a possible issue in self made configs
 async def function_try_seek(session, offset_seconds):
     position = function_get_time_position(session)
     target = position + offset_seconds
@@ -50,11 +55,14 @@ async def function_try_seek(session, offset_seconds):
     ticks = int(target * 10_000_000)
     return await session.try_change_playback_position_async(ticks)
 
-async def function_show_now_playing():
-    session = await function_find_spotify()
-    if session is None:
-        print("Spotify is not running")
-        return
+async def function_seek_wrapper_forward(session, params=None):
+    return await function_try_seek(session, float(params))
+
+async def function_seek_wrapper_backward(session, params=None):
+    return await function_try_seek(session, -float(params))
+
+
+async def function_show_now_playing(session, params = None):
 
     props = await session.try_get_media_properties_async()
 
@@ -67,17 +75,59 @@ async def function_show_now_playing():
         "track_number": props.track_number,
         "genres": list(props.genres),
     }
+    return metadata
 
-    for name, value in metadata.items():
-        print(f"{name:14}{value}")
+async def function_play_pause(session, params = None):
+    return await session.try_toggle_play_pause_async()
 
+async def function_skip_next_song(session, params = None):
+    return await session.try_skip_next_async()
 
-session = asyncio.run(function_find_spotify())
-# asyncio.run(function_try_seek(session, -200))
-# asyncio.run(function_show_now_playing())
+async def function_previous_song(session, params = None):
+    return await session.try_skip_previous_async()
+    
 
-# --- test 3: shuffle on and off ---
+# if you have add a new function to spotify SMTC. Make sure to add it here so the function handler can find it
+# the first part must match the action line coming from serial monitor that is read by main.py
+SPOTIFY_FUNCTIONS = {
+    # "GETTIME": function_get_time_position,
+    "SHUFFLE": function_shuffle_wrapper,
+    "SEEKFWD": function_seek_wrapper_forward,
+    "SEEKBACK": function_seek_wrapper_backward,
+    "SHOWDATA": function_show_now_playing,
+    "PLAYPAUSE": function_play_pause,
+    "NEXT": function_skip_next_song,
+    "PREV": function_previous_song
+}
 
-asyncio.run(function_set_shuffle(session, False))
-time.sleep(1)
-asyncio.run(function_toggle_shuffle(session))
+async def function_handle_spotify_functions(action):
+    params = None
+    if ":" in action: # an action would only contain : at this point if it holds params
+        action, params = action.split(":", 1)
+
+    if action not in SPOTIFY_FUNCTIONS:
+        print(f"action not recognised: {action}")
+        return
+
+    session = await function_find_spotify()
+    if session is None:
+        print("Spotify is not running")
+        return
+
+    func = SPOTIFY_FUNCTIONS[action]
+    await func(session, params)
+
+# --- test 4: spotify function handler ---
+line = "SEEKFWD"
+asyncio.run(function_handle_spotify_functions(line))
+
+# tested:
+# PLAYPAUSE works
+# SEEKFWD works
+# SEEKBACK works
+# SHUFFLE works
+# SHUFFLE:ON works
+# SHUFFLE:OFF works
+# DONG returns error correct
+# shuffle:bla returns error correct
+# 
