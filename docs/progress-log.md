@@ -2,7 +2,7 @@
 
 **Purpose of this document:** full context dump for continuing this project in a future chat, and source material for a later portfolio item. Written in enough detail that someone (or an AI) with zero prior context could pick this up and continue.
 
-**Last updated:** 17-8-2026
+**Last updated:** 21-8-2026
 
 ---
 
@@ -146,6 +146,34 @@ SMTC is a *media session* API and has no volume concept at all (2.5). The obviou
 **Differences from SMTC worth knowing before building it:** `pycaw` is **synchronous** — no coroutines, no `asyncio.run()`, making it the simplest integration in the project. It's COM rather than WinRT, so the naming is different but the docs situation is *better* (real Python examples exist, versus SMTC's translate-from-C# situation). Everything is read-modify-write; there is no toggle. And it has a different notion of "Spotify": SMTC finds a *media session*, `pycaw` finds an *audio session*, and these can disagree — Spotify paused for a while may have the former and not the latter.
 
 **Cost accepted:** the mixer changes the app's output level, not Spotify's own slider, so the Spotify UI won't move. Functionally identical for listening; occasionally confusing when looking at the app. Third Windows-specific dependency, consistent with the trade already accepted in 2.5.
+
+### 2.7 Spotify Web API as a *second* backend — raised and parked 21-8-2026
+
+Raised by the student unprompted: why not make the app work through **both** SMTC and the Spotify Web API, and let the user choose? Parked, but liked, and the reasoning is worth keeping because the instinct behind it is the 2.3 user-freedom argument applied one level up.
+
+**Two different ideas were being run together, and they cost very different amounts:**
+
+- **Cheap version — Web API only for what SMTC can't reach.** Not a "both backends" design at all. It is one more action string routed to a different mechanism, exactly the way `KEY:` and `SHELL:` already coexist. The dispatch table (8.9) supports it as-is: a `"LIKE"` row whose function happens to use `spotipy` instead of `winrt`. Nothing else in the app changes.
+- **Expensive version — every action available through either backend, selectable at runtime.** Needs a common interface both implement, a selection mechanism, and a duplicate implementation of everything SMTC already does perfectly. Pays OAuth, the Premium gate, the 5-user allowlist, token refresh and network latency on a button press that is currently milliseconds — to reach the same play/pause that already works.
+
+**The counter-argument to "just give the user the option," recorded because it is the interesting one.** `KEY:` and `SHELL:` are open-ended because the set of things users want is *unenumerable* — the user brings their own strings and no code is written per new use. The freedom is free. A second backend is not that: it is a second implementation to write and maintain so the user can pick a slower, auth-gated path to an identical outcome. And the choice on offer isn't a feature, it's plumbing — a choice most users cannot make an informed decision about, which usually means it should be a default rather than a setting. It also can't be expressed in a config file: the Web API path needs the user's own OAuth app registration or a slot on the 5-user allowlist, so the "option" is a setup procedure.
+
+**Where the Web API genuinely wins, i.e. the trigger to un-park this:** Like/save state, playlist context (what is playing *from*), the queue, album art URLs, track features, and control when Spotify isn't running locally.
+
+**Where it does *not* win, contrary to the motivation given ("current data"):** track name and position. The Web API's `currently-playing` is polled, so its position is as stale as SMTC's and arguably worse — SMTC at least hands back `last_updated_time` to correct against (8.7), where the Web API returns whatever the server knew when asked, plus a network round-trip. And per the correction at the top of section 2, SMTC has **change events**, so a now-playing display can be push-driven locally with no polling at all.
+
+**Parked with a named trigger:** revisit when a feature SMTC cannot reach is actually wanted — Like, playlists, queue, album art — not for position or track metadata. Doing it for **Like alone** would also answer next-steps item 7 and buy the OAuth experience without duplicating a single working function.
+
+### 2.8 Album art on the display — investigated and parked 21-8-2026
+
+Asked whether SMTC can supply the album cover. It can, and the SMTC end is the *smallest* part of the job.
+
+- **SMTC side:** `try_get_media_properties_async()` exposes a `thumbnail` property, which is a `RandomAccessStreamReference` — not bytes, not a URL. It needs `open_read_async()` and then a WinRT buffer read to get actual bytes. ⚠️ **This is from memory of the WinRT surface and has not been tested** — check `GlobalSystemMediaTransportControlsSessionMediaProperties.Thumbnail` in Microsoft's C# reference and translate, per the standing rule in 2.5.
+- **The real cost is downstream.** Whatever comes back is a JPEG or PNG of unknown size, and the ILI9488 decodes neither. The pipeline is: WinRT stream → bytes → decode (Pillow) → resize → convert to RGB565 → push over serial → into a display buffer that has already overflowed DRAM once (4.12).
+- **Rough numbers:** a 100×100 thumbnail at RGB565 is ~20 KB. At 115200 baud that's ~11 KB/s, so roughly **two seconds per cover**, blocking the serial line throughout.
+- **The Web API alternative doesn't avoid this** — it hands you a URL, but the fetch, decode, resize and convert are identical PC-side work. The SMTC awkwardness is only the first third either way.
+
+**Parked behind roadmap item 6**, which it strictly depends on: it needs the return path to exist, plus a binary transfer mode alongside the line-based text protocol, plus a fresh look at the memory budget. Not a feature — a project.
 
 ---
 
@@ -435,6 +463,47 @@ The single most repeated mistake of this session, and the one that best illustra
 
 **Rule adopted:** test harnesses go inside an `async def` called once at the bottom, never at module level. Same shape the real handler needs anyway.
 
+### 4.32 `else: return` swallowed every parameterless action (18-8-2026)
+
+The parameter split in the handler was first written as `if ":" in action: action, params = action.split(":", 1)` followed by `else: return`. The `else` was meant to mean "no parameter here" and instead meant "stop". `PLAYPAUSE`, `NEXT`, `PREV` and `SHUFFLE` all arrive without a colon, so **every single parameterless action returned before doing anything** — no error, no output, no traceback. Caught in review before it ran. Setting `params = None` on the line above makes the `else` unnecessary entirely; the `if` is then a pure enrichment step, not a branch.
+
+### 4.33 A guard that printed but did not stop (18-8-2026 → 21-8-2026, three passes)
+
+`if action not in SPOTIFY_FUNCTIONS: print(f"action not recognised: {action}")` — with no `return`. `print` does not halt execution, so the lines below ran regardless and `SPOTIFY_FUNCTIONS[action]` raised `KeyError` on the very value the guard had just rejected.
+
+**The blast radius is the point, and it applies to any unhandled exception here.** `main.py`'s dispatch is `asyncio.run(...)` inside a bare `while True` with no `try`/`except`. An exception propagates straight out of the loop and **kills the whole companion app** — Discord keybinds, `SHELL:` buttons, everything — because one Spotify action string was mistyped. One misbehaving branch takes down four categories. This motivated next-steps item 4.
+
+### 4.34 A module-level dict referencing functions defined below it (18-8-2026)
+
+`SPOTIFY_FUNCTIONS = {...}` was first placed above the function definitions, near the imports where a constant "belongs". A module executes top to bottom, and a dict literal evaluates every name inside it *when the literal runs* — so referencing `function_toggle_shuffle` at line 10 is a `NameError` at import. It went unnoticed for a while because the dict was still empty. **Rule:** the table sits below the definitions and above the handler.
+
+### 4.35 Renaming functions without updating the table (21-8-2026)
+
+`function_seek_forward` → `function_seek_wrapper_forward`, but the dict still held the old names — `NameError` at import again, same mechanism as 4.34. Recorded separately because it is the specific, recurring cost of a dispatch table: **a rename now has two edit sites and nothing checks the link.** The consolation is the failure mode's timing — the dict is evaluated at import, so a stale name kills the app immediately and loudly rather than lying in wait until someone presses that one button.
+
+### 4.36 `float(None)` and `float("")` take the entire app down (21-8-2026)
+
+`SEEKFWD` sent with no parameter → `float(None)` → `TypeError`, unhandled, read loop dead (4.33's blast radius). The realistic inputs that do this:
+
+| Input | `params` | Raises |
+|---|---|---|
+| `SEEKFWD` | `None` | `TypeError` |
+| `SEEKFWD:` | `""` | `ValueError` |
+| `SEEKFWD:1,5` (Dutch decimal comma) | `"1,5"` | `ValueError` |
+| `SEEKFWD:1O` (letter O for zero) | `"1O"` | `ValueError` |
+
+An `if params is None` check catches **only the first row**. Fixed with `try` / `except (ValueError, TypeError)` around the conversion, which covers all four in one guard. The general lesson: *you cannot test whether a string is a number by comparing it to things* — the set of bad values is infinite. Convert and catch the failure.
+
+**Why this guard, when the seek clamp (8.7) was deliberately dropped.** The clamp guarded a *user action* that Spotify already handled correctly; this guards a *malformed action string* that nothing else handles. And the consequences differ by an order of magnitude: an unclamped seek produces a slightly surprising jump, while an unguarded conversion kills every button on the device. "Don't add defensive code without evidence" — the evidence here was running it and watching the traceback.
+
+### 4.37 A bool parameter fed a string, failing silently (21-8-2026, caught in review, never ran)
+
+An intermediate dict had `"SHUFFLE_DECIDE": function_set_shuffle`, whose second parameter is a **bool** passed straight to `try_change_shuffle_active_async`. Parameters arrive off the wire as **strings**, and every non-empty string is truthy — so `SHUFFLE_DECIDE:OFF` would have turned shuffle **ON**, with no error, no traceback and a plausible-looking result. **The most dangerous shape found this session**, precisely because nothing anywhere would have reported it. Fixed by `function_shuffle_wrapper`, which converts `"ON"`/`"OFF"` into real bools and rejects anything else. This is the concrete argument for the wrapper layer in 8.9: the table's job is to convert wire strings into Python types, and any entry pointing straight at a typed function is a silent bug waiting.
+
+### 4.38 `{target:2f}` is valid syntax and wrong output (flagged 17-8, deleted 21-8-2026)
+
+`print(f"seeking to target: {target:2f}")` — missing the dot. In a format spec, `2f` parses as **width 2**, not precision 2, so it printed six decimal places and never once raised. Flagged in three consecutive sessions and survived every time because nothing complained. Resolved by deleting the print entirely, which is what it needed anyway (it fired on every seek press). **Category worth naming: the bug that produces wrong output through valid syntax is invisible to every tool and outlives several review passes.**
+
 ---
 
 ## 5. Toolchain Migration: Arduino IDE → PlatformIO
@@ -499,7 +568,12 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 │   │   └── lv_conf.h        (LVGL config, copied from template — see section 4.11)
 │   └── lib/
 └── companion-app/            (Python companion app — started 1-8-2026)
+    ├── main.py              (serial read loop + top-level category dispatch: KEY / SHELL / SPOTIFY)
+    ├── spotify_functions.py (SMTC functions, wrappers, SPOTIFY_FUNCTIONS table, second-level handler — 21-8-2026)
+    └── spotify_test.py      (scratch pad — new SMTC work gets proven here before it moves)
 ```
+
+**File-level split as of 21-8-2026** (see 8.9): `main.py` owns the serial loop and the four top-level categories; `spotify_functions.py` owns everything SMTC. The `KEY:` and `SHELL:` handlers stay in `main.py` — one is a dict lookup plus a keypress, the other is one line, and neither brings its own dependency or async model. This is the split 8.8 argued for: extract on merit, not to mirror the wire protocol.
 
 - Git set up via command line (`git init`, manual `.gitignore` creation via Notepad, `git add .` + `git commit`) after GitHub Desktop's dialogs caused confusion.
 - Repo has since been published to GitHub via GitHub Desktop's "Publish repository" button.
@@ -524,7 +598,7 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
 | 7a | Python companion app — keystroke dispatcher | ✅ **Done (1-8-2026)** — reads serial, parses `CATEGORY:ACTION`, resolves arbitrary key combos, executes them. Keybinds page and Media page both confirmed working end-to-end on hardware. **Written by the student**, incrementally. |
 | 7b | `SHELL:` category — Python handler **and** firmware action strings | ✅ **Done (2-8-2026)** — `subprocess.Popen(action, shell=True)` on the Python side, five System-page buttons on the firmware side (Lock, Sleep, Notepad, Claude, VS Code). Lock and Sleep both confirmed on hardware; see 4.19–4.21 for the Windows-specific gotchas. |
-| 7c | Python companion app — Spotify | 🟡 **Mostly done (17-8-2026).** `SPOTIFY:` wired into `main.py` via `asyncio.run()` in the handler; **Play/Pause, Next, Previous all verified on hardware.** Seek (both directions, configurable offset), shuffle set/toggle, and a drift-corrected position read are **written and tested in `spotify_test.py`** but not yet merged or dispatched. Remaining: repeat, stop/play/pause, now-playing as a function, the module split, and the second-level dispatch table. |
+| 7c | Python companion app — Spotify | 🟡 **Mostly done (21-8-2026).** `spotify_functions.py` now exists, is imported by `main.py`, and every action goes through a dispatch table (8.9). Reachable and tested from the app: PLAYPAUSE, NEXT, PREV, SEEKFWD:n, SEEKBACK:n, SHUFFLE, SHUFFLE:ON, SHUFFLE:OFF, SHOWDATA. **Only PLAYPAUSE / NEXT / PREV are reachable from the *device*** — the Spotify page still sends `VOLUP`/`VOLDOWN`/`LIKE`, so seek and shuffle wait on the firmware page rebuild. Remaining: repeat (three-state), stop/play/pause, `pycaw` volume. |
 | 7e | Spotify volume via `pycaw` (per-app audio mixer) | ⬜ Not started — decided 17-8-2026, see 2.6. Sync, no auth, simplest integration left. |
 | 7d | Discord — migrate to `KEY:` global keybinds | ✅ **Done (2-8-2026)** — 6 buttons, all verified on hardware with Discord unfocused. No API needed; see 2.4 for why, and 8.4 for what keybinds can't reach. |
 | 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started |
@@ -724,7 +798,7 @@ This still becomes a real decision at **roadmap item 6**: showing now-playing on
 
 > **⚠️ FLAG FOR ROADMAP ITEM 6 (raised deliberately 17-8-2026, do not lose):** any track position shown on the display is **approximate**, not exact — 0.5–4s of drift, reduced but not eliminated by the correction. **This must be communicated to the user in the interface** rather than presented as an exact readout. A progress bar that lags visibly looks broken in a way a seek button never does, which is also where the correction stops being optional and starts being required.
 
-### 8.8 `spotify_functions.py` and parameterised actions (decided 17-8-2026, **not yet built**)
+### 8.8 `spotify_functions.py` and parameterised actions (decided 17-8-2026 — **built 18/21-8-2026, see 8.9**)
 
 **Rejected: one file per protocol category** (`key.py`, `shell.py`, `spotify.py`, `obs.py`). It mirrors the wire format rather than the code, and the shape doesn't survive contact: `shell.py` would be one line, `obs.py` would be empty (nothing written yet, shape unknown), while `spotify.py` is already the largest thing in the app. Two of four would be real, two ceremony — the same failure mode as forcing category dispatch into a dict (8.3).
 
@@ -742,6 +816,34 @@ This still becomes a real decision at **roadmap item 6**: showing now-playing on
 **Session lifetime — settled deliberately.** The session is looked up **once per button press**, in the handler, and passed down as the first parameter to every function. Not cached at startup: a session object belongs to a *running instance* of Spotify, so a cached one dies on restart with failures that look like broken code rather than a restarted app. Not looked up per function either: the `None` guard would be duplicated a dozen times, and `function_try_seek` → `function_get_time_position` would do two lookups and could in principle get two different sessions.
 
 **Dispatch: use a dict this time.** 8.3 said to revisit the dispatch-table question at the fourth category — this is it, and the answer differs *by level*. Top-level categories stay `if`/`elif` (four ever, non-uniform bodies). The Spotify second level is a dozen-plus actions mapping name → function with uniform signatures — data-to-data, exactly what `KEY_NAMES` is. Requires a uniform signature (`func(session, params=None)`) so the no-argument ones accept and ignore `params`; slightly ugly, and it keeps the table a table.
+
+### 8.9 `spotify_functions.py` as actually built (18/21-8-2026)
+
+8.8 planned this; this is what came out, including where the plan changed.
+
+**File layout, top to bottom:** imports → SMTC-facing functions → wrappers → `SPOTIFY_FUNCTIONS` table → `function_handle_spotify_functions`. That order is forced, not stylistic (4.34).
+
+**The invariant, and the only rule the file has:** *every value in the table is `async def f(session, params=None)`.* Reading down the dict's right-hand column and checking that one property is the entire correctness check for the dispatch layer.
+
+**The wrapper layer — the main design decision of the session.** Protocol knowledge (parameters arrive as strings; `SEEKBACK` is a negative offset; `"ON"` means `True`) lives in the wrappers and the table. The SMTC-facing functions below them take **real Python types** — `function_try_seek(session, offset_seconds: float)`, `function_set_shuffle(session, bool)` — and know nothing about serial. Consequences: `spotify_functions.py` could be reused by something that isn't this protocol, and 4.37's silent-truthy-string bug becomes structurally impossible, because nothing typed is ever wired directly into the table.
+
+Built this session: `function_shuffle_wrapper` (three action strings, one key), `function_seek_wrapper_forward` / `function_seek_wrapper_backward` (conversion + sign), and three transport one-liners `function_play_pause` / `function_skip_next_song` / `function_previous_song`. The `_wrapper` suffix is now a convention in this file.
+
+**Lambdas were the plan and were dropped.** 8.8 and the early part of this session favoured `"SEEKBACK": lambda s, p: function_try_seek(s, -int(p))` — no extra names, conversion visible in the table. Rejected once 4.36 landed: **a lambda is one expression and cannot hold a `try`/`except`**, and the guard turned out to be mandatory rather than optional. Named wrappers can grow a guard; lambdas would have had to be rewritten into functions the moment one was needed. General form worth keeping: *choose the construct that can absorb the next requirement, when the next requirement is cheap to foresee.*
+
+**`float`, not `int`, for seek offsets.** Strictly more permissive (`float("10")` → `10.0`, so every existing config keeps working), and consistent with 2.3's give-the-user-the-freedom line. Noted honestly: sub-second offsets sit inside the 0.5–4 s drift window (8.7), so the extra precision is nominal — it costs nothing, and pretending it's meaningful would be wrong.
+
+**Uniform signature: the cost, paid deliberately.** About five functions carry a `params=None` they never read. This was pushed back on twice and the justification that finally held is mechanical: **there is one call site**, `await func(session, params)`, and it cannot know which function it pulled out of the table. A one-argument function handed two arguments is a `TypeError`. The middle option — dispatcher branches on whether params exist — collapses on `SHUFFLE`, because `SHUFFLE`, `SHUFFLE:ON` and `SHUFFLE:OFF` all reduce to the single key `"SHUFFLE"` after the split, so that one function needs `params` sometimes and not others regardless. The pattern is standard well beyond Python (a Django view takes `request` whether or not it reads it; `main(argc, argv)` takes both when you use neither): **a generic caller requires callees to agree on a shape, and the ignored parameter is what that agreement costs.**
+
+**Why a table rather than the `if`/`elif` chain that would also have worked.** The elif version puts protocol knowledge inside control flow, so adding an action means editing a branch structure — where typos, missing `elif`s and fall-through live (cf. 4.26, 4.32, 4.33, all control-flow bugs). The dict is data: adding an action is adding a row, with none of those failure modes. It is also *inspectable* — you can assert that every action string the firmware sends has an entry, or print the table to see what the app supports. You cannot ask an elif chain what it handles. Same reasoning that made `KEY_NAMES` a dict in `main.py`. **Caveat recorded: this only holds because the actions genuinely are uniform** (name in, SMTC call out). If three of them needed materially different arguments, forcing a common signature would be the wrong move and elifs would be the honest shape.
+
+**`GETTIME` deliberately left out of the table** (commented, not deleted). It is the only synchronous function in the file, and `await` on a float is a `TypeError`. It was **not** marked `async` to make it fit: in this project the `async` / `_async` marker is the one signal that has been consistently reliable, and `get_timeline_properties()` needing no `await` is the same fact as its position being stale (8.7). Marking an instant cache read as async to satisfy a table would spend that signal for nothing — and would force `asyncio.run()` around it in every test script and future display refresh. It also has no button and returns a value the dispatcher discards. **Re-add at roadmap item 6**, when the dispatcher's contract changes from fire-and-forget to caring about return values.
+
+**Session lifetime, now actually enforced.** 8.8 settled that the session is looked up once per press in the handler and passed down. `function_show_now_playing` was violating it by finding its own session; it now takes one like everything else, with the `None` guard living only in the handler.
+
+**Table as of 21-8-2026:** `SHUFFLE`, `SEEKFWD`, `SEEKBACK`, `SHOWDATA`, `PLAYPAUSE`, `NEXT`, `PREV`.
+
+**⚠️ Open: the action-string names have drifted from 8.8 and from the firmware.** The dict uses `PREV` (matches the flashed firmware) and `SEEKFWD`/`SEEKBACK`/`SHUFFLE` (matches 8.8), but this needs a deliberate pass against the firmware's `ButtonDef` strings before the page rebuild, because the two must agree exactly and the lookup is case-sensitive. Intermediate names `SHUFFLE_DECIDE` / `SHUFFLE_TOGGLE` were tried and dropped.
 
 ---
 
@@ -819,6 +921,15 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - **Questioned a suggestion instead of applying it:** asked why `function_get_time_position` shouldn't be `async` ("could it not have to wait to receive the timeline data?"). A fair challenge that produced the useful answer — the call is instant *because* it reads a cache, which is the same fact as the position being stale. Two things that had looked unrelated turned out to be one.
 - **Asked for a line-by-line explanation and then asked again with real numbers** when the abstract version half-landed — the same "explain it from a different angle" move as 3-8-2026, now applied without hesitation. Also checked a hypothesis about the timezone offset ("is there a chance I'm just in UTC right now?") rather than accepting the explanation on authority; it was wrong, but checking was right.
 - **Pushed back on verbosity**, twice: asked for a shorter form when an answer ran long, and asked directly what the `COUNT(arr)` problem actually *was* after it had been recommended four times without ever being explained. Both fair; the second in particular caught a real failure to justify a recommendation.
+- **Asked “why can we not just split it further?” and it was the right question at the wrong target.** Splitting `SEEKFWD:10` was never the problem — the split hands back the *string* `"10"`, and the string is the problem. Worth recording because the instinct (reach for the mechanism already in the file before adding a new one) is a good one, and because the question exposed that three previous explanations had been answering something the student wasn't asking.
+- **“wtf is a lambda anyways?” — and the first two explanations failed.** Both started from the dict use case and worked backwards. What landed was starting from `f = double` (a function is a value; you can put it in a variable) and only then showing it in a table. **The failure was the explanation's, not the student's**, and it is the same shape as the `COUNT(arr)` failure from the previous session: assuming the gap was in the syntax when it was in the concept underneath. Ending note: after all three attempts, the student chose **named wrappers over lambdas anyway** — which turned out to be the better call, because a lambda cannot hold the `try`/`except` that 4.36 made mandatory.
+- **Pushed back on `params=None` twice before accepting it** (“just no params work aswell? not like it needs them”). Fair pushback, and the first answer — essentially “it's the convention” — deserved to bounce. It only became convincing when tied to the mechanism: one call site, no way to know which function came out of the table. **A design pattern asserted is not a design pattern justified.**
+- **Asked explicitly for the reasoned professional answer** (“what would be good career standard... be a professor with years in code design”) and then took the longer answer over the shorter one. The trade — data over control flow, pay a small uniform cost to keep a boundary uniform — was accepted on the argument rather than on authority, and the caveat (elifs are honest when the callees genuinely differ) was retained.
+- **The missing `await` on `function_find_spotify()` was flagged four times across two sessions.** It landed on the fourth, when the failure was finally spelled out concretely: the call builds a coroutine object, that object is not `None` so the guard passes, and the *next* line fails with an `AttributeError` on a coroutine. Restating “you're missing an `await`” three times taught nothing. **Fourth recurrence of the same meta-failure this project keeps producing — repeating a recommendation is not explaining it** — and the fix each time has been to describe the mechanism instead.
+- **`return print(...)` was flagged twice and deliberately kept**, along with the one-line `if x: return y` style. Recorded as *a choice, not an oversight*: it's their file and their convention, and consistency within it beats an external style rule applied halfway.
+- **Two ideas raised unprompted and parked with reasons rather than dropped:** the dual SMTC/Web-API backend (2.7) and album art on the display (2.8). Both were the student's own initiative, both got costed properly, and both came out with a named trigger for revisiting. The “give the user the option” instinct is a real extension of 2.3; the counter worth remembering is that **an option nobody can make an informed choice about should be a default, not a setting.**
+- **Testing was done at the boundary before wiring, unprompted and thoroughly.** Every table entry was exercised from a scratch harness before `main.py` was touched — including the two paths that kill the read loop (`"DONG"` for the unknown action, `SEEKFWD` with no parameter), and including the case-mismatch and bad-parameter branches. This is the “test at the lowest layer first” habit applying itself without being asked.
+- **⚠️ AI misfires this session, for the catalogue (which now stands at seven):** (1) a garbled explanation of the `params.upper()` normalisation point that had to be re-asked outright (“explain”); (2) a **false alarm about the student's own test output** — claiming that `shuffle:bla` returning an error implied something was secretly normalising case, when a case-mismatched key correctly failing the `not in` check produces exactly that result. Notable because it is **the first entry in the catalogue that was not caught** — it was ignored and moved past rather than challenged. Also (3) a “nit” about reordering the session lookup that was raised as if it mattered and then withdrawn on being questioned (“what does it matter”) — it didn't, much.
 - **AI-authored code this session:** the drift-correction block and the seek/shuffle function bodies were given as sketches after the mechanics were explained, in the established boilerplate-handed-over pattern. Every one of them was typed out by the student with modifications, and the resulting bugs (4.27–4.29) were all in the student's integration of them — which is where the learning is. The `function_get_time_position` structure in particular went through four review rounds before it ran.
 
 ---
@@ -941,22 +1052,26 @@ This is precisely why 4.16 was confusing: registration and invocation are separa
 
 ## 12. Immediate Next Steps for Next Session
 
-*(as of 17-8-2026)*
+*(as of 21-8-2026)*
 
-**Done this session:** the `SPOTIFY:` category went from "decided" to **working on hardware** — Play/Pause, Next and Previous all controlled from the touchscreen, with no reflash needed and no account setup of any kind. Seek (drift-corrected, configurable offset) and shuffle (set + toggle) are written and tested but not yet dispatched. Five new hiccups (4.27–4.31), two new architecture subsections (2.6 pycaw, 8.8 module + parameterised actions), one new mechanics section (8.7), the open async question in 8.6 **closed**, and **two corrections to section 2** — the "Spotify has no push mechanism" claim, and a "migration complete" note covering a bullet that was never applied.
+**Done 18/21-8-2026:** `spotify_functions.py` is **built, tested and wired**. The module split from next-steps item 1 is complete, the second-level dispatch dict from item 2 exists with the uniform `func(session, params=None)` signature, and parameterised actions work: `SEEKFWD:10`, `SEEKBACK:10`, `SHUFFLE`, `SHUFFLE:ON`, `SHUFFLE:OFF` all verified from a scratch harness, plus `PLAYPAUSE`, `NEXT`, `PREV`, `SHOWDATA` and both failure branches (unknown action, missing/bad parameter). Seven new hiccups (4.32–4.38), one new architecture section (8.9), two new parked-with-reasons decisions (2.7 Web API second backend, 2.8 album art). Committed at the working checkpoint.
 
-**Commits made:** transport working (three buttons), then seek, then shuffle. The firmware is untouched since 3-8-2026.
+**Still true and worth stating plainly:** only **PLAYPAUSE / NEXT / PREV** are reachable from the *device*. The Spotify page still sends `VOLUP` / `VOLDOWN` / `LIKE`, which no longer even reach a branch — they hit the `action not recognised` guard. Everything else is reachable from the app but has no button.
 
-1. **Merge into `spotify_functions.py`** (8.8). `function_get_time_position`, `function_try_seek`, `function_set_shuffle`, `function_toggle_shuffle` currently live in `spotify_test.py` and are dispatched from nowhere — the device cannot reach any of them. Prerequisite is extracting `main.py`'s branch bodies into `handle_key` / `handle_shell` / `handle_spotify` first, since a file split is just moving functions that already exist. **Do not carry the module-level `asyncio.run()` test harness across (4.31).**
-2. **Second-level dispatch dict** for Spotify actions, with the uniform `func(session, params=None)` signature (8.8). This is what makes `SEEKFWD:10` and `SHUFFLE:ON` reachable, and it's the decision 8.3 deferred to the fourth category.
-3. **Finish the function set while the shape is fresh** — repeat (three-state; needs its own enum import and the same `repr()` check as 4.29, since guessing the comparison has already cost two rounds), stop / play / pause (trivial), and `get_now_playing()` (proven in `test.py`, unused until item 8, but it should live somewhere real).
-4. **`COUNT(arr)` macro** — `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`. Outstanding for three sessions now. The reasoning was finally written down this session and is worth restating: the hand-typed count in `pages[]` is an unchecked promise about an array, and `buildPage` trusts it completely because a decayed pointer carries no length. **Too low** hides buttons (harmless, happened twice); **too high** reads past the end of the array and dereferences garbage as a string pointer (crash or reboot loop). Item 5 below is the first time this project will *shrink* an array, which is the dangerous direction. Note the macro only works where the real array type is in scope — `COUNT(page->buttons)` would compile and be wrong.
-5. **Rebuild the Spotify pages as one page** (2.5). Six buttons: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Deletes `PAGE_SPOTIFY2`/`PAGE_SPOTIFY3`, the `prevPage`/`nextPage` chain, the "n/m" titles and the last placeholder page. **Currently three of the six buttons on Spotify page 1 print "action not recognised"** (`VOLUP`, `VOLDOWN`, `LIKE` — SMTC has none of them), so the page is half-lying about what it can do. ⚠️ `COUNT` fixes the counts but **not** the enum/`pages[]` ordering trap from 8.2 — deleting two rows from the middle shifts every later page index, so the enum must be edited in lockstep.
-6. **Spotify volume via `pycaw`** (2.6) — genuinely the easiest thing left: synchronous, no auth, real Python docs, and the find-by-process-name pattern is already familiar from `function_find_spotify`. Good palate cleanser. Watch for Spotify holding multiple audio sessions (helper processes), and for the app having *no* audio session when it has been silent a while.
-7. **Decide whether Like earns the Web API.** Unchanged and still open. The full OAuth stack, Premium gate and 5-user allowlist for **one button**. Everything else Spotify-related is now done without it, which arguably makes the answer easier.
-8. **Two-way protocol** (roadmap item 6) — now better motivated *and* cheaper than the log previously assumed, because SMTC has **change events** (correction at the top of section 2), so this may be "react to a callback" rather than "poll on a timer." ⚠️ **Carry the drift flag from 8.7 into the interface work:** any position shown on the display is approximate (0.5–4s), and that must be communicated to the user rather than presented as exact. This is also where the async read-loop question stops being cosmetic — and note it is *not* the ten-minute change it looks like (8.6).
-9. **OBS** (`obsws-python`) — the last integration with no shortcut available. Note the parameterised-action work done this session means `OBS:SCENE:1` no longer needs a protocol decision; the second-level split idiom already exists.
-10. **Async is still the declared weak point, but visibly less so.** The coroutine-never-awaited bug was hit twice this session and recognised the second time. Keep taking it in small doses through items 2 and 8 rather than in one lump.
-11. **Python tidy-up** (optional, unchanged): align naming to snake_case (currently mixed, and the new functions follow the existing `function_` prefix deliberately — do the realignment as its own commit, not halfway); auto-detect the COM port via the CP2102's USB VID/PID (`0x10C4`/`0xEA60`) instead of hardcoding COM13; wrap the port open in a retry so unplugging doesn't kill the script. Also: strip the remaining diagnostic prints from `function_get_time_position` and `function_try_seek` before they fire on every button press.
-12. **Comment the machine-specific strings** (8.5) — still outstanding. Username path, PATH dependency and self-assigned Discord keybinds.
-13. **Parked, unchanged:** PTT / hold-state would need `KEYDOWN:`/`KEYUP:` (8.4); sequential combos would need a `;` separator (8.3); Discord RPC only after item 8 exists (2.4); the ESP32-S2 mini could be retested, ideally with the VBUS/GND multimeter check that was never actually done.
+1. **Finish the function set while the shape is fresh** — repeat (three-state; needs its own enum import and the same `repr()` check as 4.29, since guessing the comparison has already cost two rounds), and stop / play / pause (trivial). Both slot straight into the table as `async def f(session, params=None)`; repeat probably wants a wrapper like shuffle's, since `REPEAT` / `REPEAT:ONE` / `REPEAT:ALL` / `REPEAT:OFF` collapse to one key.
+2. **`COUNT(arr)` macro** — `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`. Outstanding for four sessions. The hand-typed count in `pages[]` is an unchecked promise about an array and `buildPage` trusts it completely, because a decayed pointer carries no length. **Too low** hides buttons (harmless, happened twice); **too high** reads past the end and dereferences garbage as a string pointer (crash or reboot loop). Item 3 below is the first time this project will *shrink* an array — the dangerous direction. The macro only works where the real array type is in scope: `COUNT(page->buttons)` would compile and be wrong.
+3. **Rebuild the Spotify pages as one page** (2.5). Six buttons: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Deletes `PAGE_SPOTIFY2`/`PAGE_SPOTIFY3`, the `prevPage`/`nextPage` chain, the "n/m" titles and the placeholder page. ⚠️ **First: reconcile the action strings** (8.9) — the firmware's `ButtonDef` strings and the `SPOTIFY_FUNCTIONS` keys must match exactly, the lookup is case-sensitive, and the seek buttons now need the `:10` parameter in the string. ⚠️ `COUNT` fixes the counts but **not** the enum/`pages[]` ordering trap from 8.2 — deleting two rows from the middle shifts every later page index, so the enum must be edited in lockstep. This is the step that finally makes seek and shuffle pressable.
+4. **Harden `main.py`'s dispatch against exceptions** (4.33, 4.36). The `while True` loop has no `try`/`except`, so any unhandled exception in *any* category kills the whole app — every button on the device, not just the offending one. The per-wrapper guards fix the two known cases; a `try`/`except` around the dispatch fixes the class. Small, and it protects everything built so far.
+5. **Spotify volume via `pycaw`** (2.6) — still the easiest thing left: synchronous, no auth, real Python docs, find-by-process-name already familiar from `function_find_spotify`. Note it will *not* need the async wrapper treatment, which makes it the first table entry where the uniform-`async` rule is a genuine cost rather than a freebie — decide then whether a sync entry gets an async wrapper (the `GETTIME` question from 8.9, deferred once already). Watch for Spotify holding multiple audio sessions, and for the app having *no* audio session after silence.
+6. **Decide whether Like earns the Web API** — unchanged and still open, and now cross-referenced with 2.7: doing it for Like alone is also the cheapest way to get the OAuth experience without duplicating a single working function.
+7. **Two-way protocol** (roadmap item 6) — the gate for a lot of parked work. SMTC has **change events**, so this may be "react to a callback" rather than "poll on a timer". This is also where the dispatcher's contract changes from fire-and-forget to caring about return values, which is when `GETTIME` and `SHOWDATA` become real table entries. ⚠️ Carry the drift flag from 8.7 into the interface work: any position shown is approximate (0.5–4 s) and must be communicated as such. ⚠️ Not the ten-minute change it looks like — `readline()` blocks, and `async` alone doesn't change that (`asyncio.to_thread()`, `pyserial-asyncio`, or a reader thread + queue).
+8. **OBS** (`obsws-python`) — the last integration with no shortcut available. The parameterised-action work means `OBS:SCENE:1` needs no protocol decision; the second-level split idiom now exists *and* has a working reference implementation in `function_handle_spotify_functions`.
+9. **Async is still the declared weak point, but visibly less so.** The coroutine-never-awaited pattern recurred (the missing `await` on `function_find_spotify`) and took four flags to land — but the student is now fluent with `_async` as a contract, and the sync-vs-async table question in 8.9 was reasoned about correctly and unprompted. Keep taking it in small doses through items 5 and 7 rather than in one lump.
+10. **Python tidy-up** (optional, unchanged): align naming to snake_case (currently mixed; the `function_` prefix and the new `_wrapper` suffix are deliberate project conventions — do the realignment as its own commit, not halfway); auto-detect the COM port via the CP2102's USB VID/PID (`0x10C4`/`0xEA60`) instead of hardcoding COM13; wrap the port open in a retry so unplugging doesn't kill the script.
+11. **Comment the machine-specific strings** (8.5) — still outstanding. Username path, PATH dependency and self-assigned Discord keybinds.
+12. **Small leftovers in `spotify_functions.py`:** the comment above `function_try_seek` still names `function_seek_forward` / `function_seek_backward` (renamed since); `float(offset)` re-converts a value that is already a float; the duplicated error-message string in the two seek wrappers will drift if one is ever reworded.
+13. **Parked with named triggers (all still live, none dropped):**
+    - **Web API as a second backend** (2.7) — revisit when a feature SMTC cannot reach is actually wanted (Like, playlists, queue, album art), not for position or track metadata. The student is a fan of this idea; it is parked, not rejected.
+    - **Album art on the display** (2.8) — strictly behind item 7; needs a binary transfer mode and a memory-budget review. ~2 s per cover at 115200 baud.
+    - **`GETTIME` as a table entry** (8.9) — behind item 7.
+    - PTT / hold-state would need `KEYDOWN:`/`KEYUP:` (8.4); sequential combos would need a `;` separator (8.3); Discord RPC only after item 7 exists (2.4); the ESP32-S2 mini could be retested, ideally with the VBUS/GND multimeter check that was never actually done.
