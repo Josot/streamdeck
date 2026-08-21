@@ -56,6 +56,7 @@ enum {
   PAGE_DISCORD,
   PAGE_SPOTIFY,
   PAGE_OBS,
+  PAGE_SCENES,
   PAGE_MEDIA,
   PAGE_SYSTEM
 };
@@ -97,12 +98,19 @@ static const ButtonDef spotifyButtons[] = {
 };
 
 static const ButtonDef obsButtons[] = {
-  { LV_SYMBOL_IMAGE  "\nScene 1", "OBS:SCENE:1", 0 },
-  { LV_SYMBOL_IMAGE  "\nScene 2", "OBS:SCENE:2", 0 },
+  { LV_SYMBOL_IMAGE  "\nScenes",  NULL, PAGE_SCENES },
   { LV_SYMBOL_UPLOAD "\nStream",  "OBS:STREAM",  0 },
   { LV_SYMBOL_VIDEO  "\nRecord",  "OBS:RECORD",  0 },
   { LV_SYMBOL_MUTE   "\nMic",     "OBS:MIC",     0 },
   { LV_SYMBOL_AUDIO  "\nDesktop", "OBS:DESKTOP", 0 },
+};
+
+static const ButtonDef sceneButtons[] = {
+  { LV_SYMBOL_UPLOAD "\nStart stream\nScene 1", "OBS:SCENE:Start stream", 0 },
+  { LV_SYMBOL_STOP   "\nEnd stream\nScene 2",   "OBS:SCENE:End stream",   0 },
+  { LV_SYMBOL_VIDEO  "\nCamera\nScene 3",       "OBS:SCENE:Camera",       0 },
+  { LV_SYMBOL_IMAGE  "\nGame\nScene 4",         "OBS:SCENE:Game",         0 },
+  { LV_SYMBOL_PAUSE  "\nPauze\nScene 5",        "OBS:SCENE:Pauze",        0 },
 };
 
 static const ButtonDef mediaButtons[] = {
@@ -129,6 +137,7 @@ static const PageDef pages[] = {
   { "Discord",  discordButtons, COUNT(discordButtons), PAGE_HOME, -1, -1 },
   { "Spotify",  spotifyButtons, COUNT(spotifyButtons), PAGE_HOME, -1, -1 },
   { "OBS",      obsButtons,     COUNT(obsButtons),     PAGE_HOME, -1, -1 },
+  {"OBS Scenes",sceneButtons,   COUNT(sceneButtons),   PAGE_OBS,  -1, -1 },
   { "Media",    mediaButtons,   COUNT(mediaButtons),   PAGE_HOME, -1, -1 },
   { "System",   systemButtons,  COUNT(systemButtons),  PAGE_HOME, -1, -1 },
 };
