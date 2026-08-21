@@ -50,9 +50,7 @@ enum {
   PAGE_HOME,
   PAGE_KEYS,
   PAGE_DISCORD,
-  PAGE_SPOTIFY,   // Spotify 1/3
-  PAGE_SPOTIFY2,  // Spotify 2/3
-  PAGE_SPOTIFY3,  // spotify 3/3
+  PAGE_SPOTIFY,
   PAGE_OBS,
   PAGE_MEDIA,
   PAGE_SYSTEM
@@ -87,29 +85,11 @@ static const ButtonDef discordButtons[] = {
 
 static const ButtonDef spotifyButtons[] = {
   { LV_SYMBOL_PLAY       "\nPlay/Pause", "SPOTIFY:PLAYPAUSE", 0 },
-  { LV_SYMBOL_NEXT       "\nNext",       "SPOTIFY:NEXT",      0 },
   { LV_SYMBOL_PREV       "\nPrevious",   "SPOTIFY:PREV",      0 },
-  { LV_SYMBOL_VOLUME_MAX "\nVol +",      "SPOTIFY:VOLUP",     0 },
-  { LV_SYMBOL_VOLUME_MID "\nVol -",      "SPOTIFY:VOLDOWN",   0 },
-  { LV_SYMBOL_OK         "\nLike",       "SPOTIFY:LIKE",      0 },
-};
-
-static const ButtonDef spotify2Buttons[] = {
-  { LV_SYMBOL_SHUFFLE "\nShuffle",  "SPOTIFY:SHUFFLE",  0 },
-  { LV_SYMBOL_LOOP    "\nRepeat",   "SPOTIFY:REPEAT",   0 },
-  { LV_SYMBOL_MUTE    "\nMute",     "SPOTIFY:MUTE",     0 },
-  { LV_SYMBOL_RIGHT   "\nSeek +10", "SPOTIFY:SEEKFWD",  0 },
-  { LV_SYMBOL_LEFT    "\nSeek -10", "SPOTIFY:SEEKBACK", 0 },
-  { LV_SYMBOL_LIST    "\nQueue",    "SPOTIFY:QUEUE",    0 },
-};
-
-static const ButtonDef spotify3Buttons[] = {
-  { LV_SYMBOL_SHUFFLE "\nQueue",  "SPOTIFY:SHUFFLE",  0 },
-  { LV_SYMBOL_SHUFFLE    "\nQueue",   "SPOTIFY:REPEAT",   0 },
-  { LV_SYMBOL_SHUFFLE    "\nQueue",     "SPOTIFY:MUTE",     0 },
-  { LV_SYMBOL_SHUFFLE   "\nQueue +10", "SPOTIFY:SEEKFWD",  0 },
-  { LV_SYMBOL_SHUFFLE    "\nQueue -10", "SPOTIFY:SEEKBACK", 0 },
-  { LV_SYMBOL_SHUFFLE    "\nQueue",    "SPOTIFY:QUEUE",    0 },
+  { LV_SYMBOL_NEXT       "\nNext",       "SPOTIFY:NEXT",      0 },
+  { LV_SYMBOL_LEFT       "\nSeek -10",   "SPOTIFY:SEEKBACK:10",  0 },
+  { LV_SYMBOL_RIGHT      "\nSeek 10",     "SPOTIFY:SEEKFWD:10",   0 },
+  { LV_SYMBOL_SHUFFLE    "\nShuffle",     "SPOTIFY:SHUFFLE",      0 },
 };
 
 static const ButtonDef obsButtons[] = {
@@ -143,9 +123,7 @@ static const PageDef pages[] = {
   { "Home",        homeButtons,     6, -1,        -1,           -1 },
   { "Keybinds",    keyButtons,      6, PAGE_HOME, -1,           -1 },
   { "Discord",     discordButtons,  6, PAGE_HOME, -1,           -1 },
-  { "Spotify 1/3", spotifyButtons,  6, PAGE_HOME, -1,           PAGE_SPOTIFY2 },
-  { "Spotify 2/3", spotify2Buttons, 6, PAGE_HOME, PAGE_SPOTIFY, PAGE_SPOTIFY3},
-  {"Spotify 3/3", spotify3Buttons, 6, PAGE_HOME, PAGE_SPOTIFY2, -1},
+  { "Spotify",     spotifyButtons,  6, PAGE_HOME, -1,           -1 },
   { "OBS",         obsButtons,      6, PAGE_HOME, -1,           -1 },
   { "Media",       mediaButtons,    6, PAGE_HOME, -1,           -1 },
   { "System",      systemButtons,   5, PAGE_HOME, -1,           -1 },
