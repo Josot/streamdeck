@@ -2,7 +2,7 @@ import serial # used to read out serial
 import subprocess # Used for shell catagory
 from pynput.keyboard import Controller, Key # used to simulate keyboard presses
 import asyncio
-from winrt.windows.media.control import ( GlobalSystemMediaTransportControlsSessionManager as MediaManager)
+import spotify_functions
 
 keyboard = Controller()
 
@@ -51,32 +51,6 @@ def function_execute_keybinds(resolvedKeys):
     for key in reversed(heldKeys):
         keyboard.release(key)
 
-async def function_find_spotify():
-    manager = await MediaManager.request_async()
-    for session in manager.get_sessions():
-        app_id = session.source_app_user_model_id.lower()
-        if "spotify" in app_id:
-            print(app_id)
-            return session
-
-    return None
-
-async def function_handle_spotify(action):
-    session = await function_find_spotify()
-    if session is None:
-        print("Spotify not found")
-        return
-
-    if action == "PLAYPAUSE":
-        await session.try_toggle_play_pause_async()
-    elif action == "NEXT":
-        await session.try_skip_next_async()
-    elif action == "PREV":
-        await session.try_skip_previous_async()
-    else:
-        print(f"action not recognised: {action}")
-        return
-
 while True:
 
     # Read the line and save it it for futher use
@@ -111,7 +85,7 @@ while True:
         subprocess.Popen(action, shell=True) # perform action, use Popen because it is NOT blocking
 
     elif category == "SPOTIFY":
-        asyncio.run(function_handle_spotify(action))
+        asyncio.run(spotify_functions.function_handle_spotify_functions(action))
 
     else:
         print(f"cannot find the given category: {category}")
