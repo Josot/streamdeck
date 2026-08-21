@@ -124,7 +124,4 @@ async def function_handle_spotify_functions(action):
 
     func = SPOTIFY_FUNCTIONS[action]
     await func(session, params)
-
-# --- test 4: spotify function handler ---
-line = "SEEKFWD"
-asyncio.run(function_handle_spotify_functions(line))
+    
