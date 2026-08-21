@@ -66,26 +66,29 @@ while True:
 
     category, action = line.split(":", 1) # 1 cut due to some names being example: OBS:SCENE:1 or SHELL:C:\Windows\notepad.exe
 
+    try:
 
-    if category == "KEY":
-        keys = action.split("+") # split it into keys for example WIN+SHIFT+S becomes [0] WIN [1] SHIFT [2] S
-        resolvedKeys = [] # put in all keys that went through function_resolve_keys
+        if category == "KEY":
+            keys = action.split("+") # split it into keys for example WIN+SHIFT+S becomes [0] WIN [1] SHIFT [2] S
+            resolvedKeys = [] # put in all keys that went through function_resolve_keys
 
-        for key in keys:
-            key = function_resolve_keys(key)
-            resolvedKeys.append(key)
+            for key in keys:
+                key = function_resolve_keys(key)
+                resolvedKeys.append(key)
 
-        if None in resolvedKeys: # if function_resolve_keys couldn't resolve the given 
-            print(f"Unknown key in: {line}")
-            continue
+            if None in resolvedKeys: # if function_resolve_keys couldn't resolve the given 
+                print(f"Unknown key in: {line}")
+                continue
 
-        function_execute_keybinds(resolvedKeys)
+            function_execute_keybinds(resolvedKeys)
 
-    elif category == "SHELL":
-        subprocess.Popen(action, shell=True) # perform action, use Popen because it is NOT blocking
+        elif category == "SHELL":
+            subprocess.Popen(action, shell=True) # perform action, use Popen because it is NOT blocking
 
-    elif category == "SPOTIFY":
-        asyncio.run(spotify_functions.function_handle_spotify_functions(action))
+        elif category == "SPOTIFY":
+            asyncio.run(spotify_functions.function_handle_spotify_functions(action))
 
-    else:
-        print(f"cannot find the given category: {category}")
+        else:
+            print(f"cannot find the given category: {category}")
+    except Exception as e:
+        print(f'error on: {line}: {e}')
