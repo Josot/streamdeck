@@ -2,7 +2,7 @@
 
 **Purpose of this document:** full context dump for continuing this project in a future chat, and source material for a later portfolio item. Written in enough detail that someone (or an AI) with zero prior context could pick this up and continue.
 
-**Last updated:** 21-8-2026
+**Last updated:** 21-8-2026 (second session that day — see the 4.39–4.41 hiccups and the section 12 rewrite)
 
 ---
 
@@ -127,7 +127,7 @@ The original plan (26-7-2026) assumed Spotify meant OAuth and `spotipy`. Checkin
 
 **Cost accepted:** a second and deeper Windows dependency. `SHELL:` strings could be swapped per-OS in a config file; SMTC would need a completely different implementation on Linux (MPRIS over D-Bus — same idea, different plumbing). Given `rundll32` is already in the companion app, this doesn't lose portability that existed.
 
-### 2.6 Spotify volume: the Windows audio mixer (`pycaw`) — decided 17-8-2026, **not yet built**
+### 2.6 Spotify volume: the Windows audio mixer (`pycaw`) — decided 17-8-2026, **not built, and now re-opened**
 
 SMTC is a *media session* API and has no volume concept at all (2.5). The obvious remaining route was the Web API's volume endpoint — Premium, OAuth, allowlist, expiring token, for one number.
 
@@ -146,6 +146,8 @@ SMTC is a *media session* API and has no volume concept at all (2.5). The obviou
 **Differences from SMTC worth knowing before building it:** `pycaw` is **synchronous** — no coroutines, no `asyncio.run()`, making it the simplest integration in the project. It's COM rather than WinRT, so the naming is different but the docs situation is *better* (real Python examples exist, versus SMTC's translate-from-C# situation). Everything is read-modify-write; there is no toggle. And it has a different notion of "Spotify": SMTC finds a *media session*, `pycaw` finds an *audio session*, and these can disagree — Spotify paused for a while may have the former and not the latter.
 
 **Cost accepted:** the mixer changes the app's output level, not Spotify's own slider, so the Spotify UI won't move. Functionally identical for listening; occasionally confusing when looking at the app. Third Windows-specific dependency, consistent with the trade already accepted in 2.5.
+
+> **Re-opened 21-8-2026 (second session).** The student is no longer sold on `pycaw`, specifically because of the cost accepted in the paragraph above: *"pycaw might not really be the move... might use API way for that. To have it done proper with spotify volume slider."* That is the third row of the ledger — Spotify's own internal slider — which only the Web API reaches. Not a decision yet, and it changes the shape of 2.7: it would make **volume**, not Like, the feature that justifies the OAuth stack. Worth costing both before building either, since `pycaw` is an afternoon and the Web API is a dependency plus an auth flow. **No work done on volume this session; it is off the critical path until decided.**
 
 ### 2.7 Spotify Web API as a *second* backend — raised and parked 21-8-2026
 
@@ -500,9 +502,52 @@ An `if params is None` check catches **only the first row**. Fixed with `try` / 
 
 An intermediate dict had `"SHUFFLE_DECIDE": function_set_shuffle`, whose second parameter is a **bool** passed straight to `try_change_shuffle_active_async`. Parameters arrive off the wire as **strings**, and every non-empty string is truthy — so `SHUFFLE_DECIDE:OFF` would have turned shuffle **ON**, with no error, no traceback and a plausible-looking result. **The most dangerous shape found this session**, precisely because nothing anywhere would have reported it. Fixed by `function_shuffle_wrapper`, which converts `"ON"`/`"OFF"` into real bools and rejects anything else. This is the concrete argument for the wrapper layer in 8.9: the table's job is to convert wire strings into Python types, and any entry pointing straight at a typed function is a silent bug waiting.
 
-### 4.38 `{target:2f}` is valid syntax and wrong output (flagged 17-8, deleted 21-8-2026)
+### 4.38 `{target:2f}` is valid syntax and wrong output (flagged 17-8, **not** deleted — see correction)
 
-`print(f"seeking to target: {target:2f}")` — missing the dot. In a format spec, `2f` parses as **width 2**, not precision 2, so it printed six decimal places and never once raised. Flagged in three consecutive sessions and survived every time because nothing complained. Resolved by deleting the print entirely, which is what it needed anyway (it fired on every seek press). **Category worth naming: the bug that produces wrong output through valid syntax is invisible to every tool and outlives several review passes.**
+`print(f"seeking to target: {target:2f}")` — missing the dot. In a format spec, `2f` parses as **width 2**, not precision 2, so it printed six decimal places and never once raised. Flagged in three consecutive sessions and survived every time because nothing complained. **Category worth naming: the bug that produces wrong output through valid syntax is invisible to every tool and outlives several review passes.**
+
+> **Correction (21-8-2026, second session).** This entry previously said the print was "resolved by deleting it entirely." **It was never deleted** — the line was still in `function_try_seek` at the start of the next session, found by reading the file rather than trusting the log. Second time a confident past-tense claim in this document turned out not to describe the code (cf. the "migration complete" note in 2.3, caught 17-8). The claim was written by the AI into the same log that already warned about exactly this.
+>
+> **And the print now stays, deliberately.** The student's call: *"I WANT the seeking to target to stay in there. I find it nice to have."* It is useful feedback on a button whose effect is otherwise invisible until you look at Spotify. The formatting bug is real and cosmetic — `{target:.2f}` fixes it whenever it is worth touching. Recorded as **a choice, not an oversight**, same as `return print(...)` in 8.9.
+
+### 4.39 The handler was imported, wired, and never awaited (21-8-2026, second session)
+
+`main.py`'s branch read `spotify_functions.function_handle_spotify_functions(action)`. That function is `async def`, so the call built a coroutine object and dropped it on the floor — **no error, no traceback, no button response**, just an eventual `RuntimeWarning: coroutine ... was never awaited` if Python got round to garbage-collecting it. Every Spotify press from the device did nothing.
+
+Fixed with `asyncio.run(spotify_functions.function_handle_spotify_functions(action))` — the sync→async crossing, one event loop per press, which was the design settled in 8.6 all along. Telling detail: `import asyncio` was already at the top of `main.py` and otherwise unused, so the intent was there and only the call site was missing.
+
+**Why it is recorded separately from 4.27** rather than as a repeat: 4.27 was a missing `await` *inside* async code, where the fix is one keyword. This is the boundary case — sync code calling into async — where `await` is not even legal and `asyncio.run()` is the only answer. Same symptom, different mechanism, and the boundary is the version that will recur (it is the same call shape OBS and any future category will need if they go async).
+
+### 4.40 The test harness fired on import — exactly as 4.31 predicted (21-8-2026, second session)
+
+4.31 described this failure in the abstract on 17-8. It then happened. The two lines at the bottom of `spotify_functions.py`:
+
+```python
+line = "SEEKFWD"
+asyncio.run(function_handle_spotify_functions(line))
+```
+
+survived into the imported module, so **launching the companion app** printed, before the read loop had started:
+
+```
+current param: None does not work. For seek you need a number in seconds. e.g 10.5 or 4
+```
+
+It spun up an event loop, went looking for Spotify and ran a real seek attempt at import time. Harmless on the day only because the 4.36 guard was already there to catch `float(None)`; without it the app would have died on startup, every time.
+
+**Resolved by deleting both lines.** The module is exercised through `main.py` now, so the harness had no remaining job. `if __name__ == "__main__":` was covered as the general mechanism — Python sets `__name__` to `"__main__"` on direct run and to the module name on import, so a block under that guard runs only when the file is the entry point. Worth having for the *next* scratch harness (repeat, `pycaw`); it was the wrong answer for this one, which was disposable.
+
+### 4.41 Three bugs in the rebuilt Spotify page, all caught in review (21-8-2026, second session)
+
+The page rebuild was written by the student and reviewed before flashing. None of these reached hardware:
+
+| Bug | Effect if flashed |
+|---|---|
+| `"SPOTFY:SEEKBACK:10"` — missing `I` | Category never matches; falls to `main.py`'s `else` and prints `cannot find the given category: SPOTFY`. Silent from the device's side. |
+| `"SPOTIFY:SEEKBACK:-10"` — sign in the string | `function_seek_wrapper_backward` already negates (`-float(offset)`), so `-(-10)` = **+10** and the back button seeks *forward*. |
+| `LV_SYMBOL_VOLUME_MAX` / `_MID` / `_OK` on the seek and shuffle buttons | Icons left over from the deleted Vol+/Vol−/Like row — the same label-doesn't-match-action rot that made the old placeholder page 3 unreadable. |
+
+The middle one is the interesting one and it is 8.9's wrapper rule seen from the other side: **the wrapper owns the direction, so the action string must carry magnitude only.** Putting the sign in the string means two places now encode it, and they cancel. Any future parameter with a convention baked into its wrapper has the same trap.
 
 ---
 
@@ -592,16 +637,16 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 3c | LVGL setup (replaces manual drawing/hit-testing with a real UI library) | ✅ Done — library installed, config wired, display flush + touch read callbacks working, DRAM overflow fixed, single button + label rendering and confirmed on screen |
 | 3d | LVGL: generalize to full 6-button grid using LVGL widgets | ✅ Done (26-7-2026) — went straight to the full data-driven multi-page version, skipping the intermediate single-page 6-button step |
 | 3e | LVGL: styling (background/button colors) | ✅ Done (26-7-2026) — color constants centralized, pressed-state feedback via `LV_STATE_PRESSED` styles confirmed on hardware (small touch-to-highlight delay, within acceptable range for resistive touch + LVGL's polling interval). `lv_refr_now` rule obsolete per 4.16. |
-| 3f | LVGL: multi-page navigation (home → category pages → paged categories) | ✅ Done (26-7-2026) — 9 pages working on hardware incl. a 3-page Spotify chain; navigation tested up/down/sideways. Spotify page 3 content is placeholder. |
+| 3f | LVGL: multi-page navigation (home → category pages → paged categories) | ✅ Done (26-7-2026) — 9 pages working on hardware incl. a 3-page Spotify chain. **Collapsed to 7 pages on 21-8-2026** when the Spotify chain became one page; the prev/next chain mechanism is now unused but retained in `PageDef`/`buildPage` for the next category that needs it. |
 | 4 | USB HID | ❌ **Dropped as a requirement** — companion app handles keystroke simulation instead (see section 2) |
 | 5 | Wire button grid → serial | ✅ **Done (1-8-2026)** — action strings confirmed arriving in the Python app; protocol upgraded to v3 (see 2.3) |
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
 | 7a | Python companion app — keystroke dispatcher | ✅ **Done (1-8-2026)** — reads serial, parses `CATEGORY:ACTION`, resolves arbitrary key combos, executes them. Keybinds page and Media page both confirmed working end-to-end on hardware. **Written by the student**, incrementally. |
 | 7b | `SHELL:` category — Python handler **and** firmware action strings | ✅ **Done (2-8-2026)** — `subprocess.Popen(action, shell=True)` on the Python side, five System-page buttons on the firmware side (Lock, Sleep, Notepad, Claude, VS Code). Lock and Sleep both confirmed on hardware; see 4.19–4.21 for the Windows-specific gotchas. |
-| 7c | Python companion app — Spotify | 🟡 **Mostly done (21-8-2026).** `spotify_functions.py` now exists, is imported by `main.py`, and every action goes through a dispatch table (8.9). Reachable and tested from the app: PLAYPAUSE, NEXT, PREV, SEEKFWD:n, SEEKBACK:n, SHUFFLE, SHUFFLE:ON, SHUFFLE:OFF, SHOWDATA. **Only PLAYPAUSE / NEXT / PREV are reachable from the *device*** — the Spotify page still sends `VOLUP`/`VOLDOWN`/`LIKE`, so seek and shuffle wait on the firmware page rebuild. Remaining: repeat (three-state), stop/play/pause, `pycaw` volume. |
+| 7c | Python companion app — Spotify | ✅ **Done for the built function set (21-8-2026, second session).** `spotify_functions.py` is imported *and awaited* by `main.py` (4.39), and **all six device buttons are verified working on hardware**: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. The firmware and the `SPOTIFY_FUNCTIONS` keys now agree exactly. `SHOWDATA` works from the app but has no button (it returns metadata the dispatcher discards — real at roadmap item 6). Deliberately **not** built: repeat (deprioritised by the student), volume (2.6 re-opened, Web API vs `pycaw` undecided). |
 | 7e | Spotify volume via `pycaw` (per-app audio mixer) | ⬜ Not started — decided 17-8-2026, see 2.6. Sync, no auth, simplest integration left. |
 | 7d | Discord — migrate to `KEY:` global keybinds | ✅ **Done (2-8-2026)** — 6 buttons, all verified on hardware with Discord unfocused. No API needed; see 2.4 for why, and 8.4 for what keybinds can't reach. |
-| 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started |
+| 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started — **chosen by the student as the next piece of work (21-8-2026).** Six action strings already exist in the firmware and already reach `main.py`'s `else` branch. |
 | 9 | Polish (icons, config format, case, etc.) | ⬜ Not started — roadmap idea: long-term, a layout editor in the companion app (device stores a layout pushed from the PC) so button changes never require compiling firmware; see section 12 |
 
 **Toolchain/infra status (all done, not part of the numbered roadmap but consumed real time):**
@@ -650,7 +695,11 @@ All UI content lives in `const` data tables at the top of the file; one generic 
   | Streamer | `KEY:CTRL+SHIFT+S` | **self-assigned** |
 
   Notes for a future session: the backtick needs no `KEY_NAMES` entry — it's one character, so the resolver's `len(key) == 1` branch passes it to pynput as a plain string. The overlay action is **not** called "Overlay" in Discord's dropdown; there are three separate overlay actions (Toggle Overlay, Toggle Overlay Lock, Activate Overlay Chat) and only the middle one matches Shift+`. Overlay actions are hidden from the dropdown entirely unless the overlay is enabled under Settings → Game Overlay, and the overlay is Windows-only. Also: **Discord disables all keybinds while the Keybinds settings page is visible**, so testing from the device with that page open shows nothing and looks broken. Assign keybinds under Settings → Keybinds rather than under Game Overlay — there is a long-standing bug where recording it on the latter page clears it on navigation. `CTRL+SHIFT+S` collides with Save As in many apps; Discord wins while running, but worth changing if it ever conflicts.
-- ⚠️ **The `pages[]` `buttonCount` was forgotten twice in one session** when adding buttons to System and Discord — the single most repeated mistake in this project so far. This is exactly what the planned `COUNT(arr)` macro prevents, and it has been promoted to next-steps item 1 as a result.
+- ✅ **`COUNT(arr)` is in (21-8-2026, second session), after being outstanding for five.** `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`, declared at the top of the data section, used for every row of `pages[]` and for `pageCount` itself. The `buttonCount` field still exists and `buildPage` is unchanged — the only difference is that the number is now computed by the compiler instead of typed by hand, so it cannot drift from the array. **The `pages[]` `buttonCount` had previously been forgotten twice in one session** (System and Discord), which was the single most repeated mistake in the project.
+  - **Why it must be a macro, not a function:** `sizeof` needs the real array type in scope. Inside `buildPage`, `page->buttons` is a `const ButtonDef *` — the length is gone, and `COUNT(page->buttons)` would compile happily and evaluate to `0`. It only works at the `pages[]` table, where `spotifyButtons` is still visibly an array.
+  - The inner parens in `(a)[0]` and the outer parens around the whole expression are the standard macro-hygiene reflex: a macro is textual substitution, so without them a caller's surrounding operators can regroup the expansion.
+
+- **Spotify collapsed from three pages to one (21-8-2026, second session).** `spotify2Buttons[]`, `spotify3Buttons[]`, `PAGE_SPOTIFY2` and `PAGE_SPOTIFY3` all deleted; the "n/m" titles are gone and the surviving page's `nextPage` is back to `-1`. **This was the project's first array/page *deletion*** — the direction 8.2's ordering trap actually punishes, since removing two rows from the middle shifts `PAGE_OBS`, `PAGE_MEDIA` and `PAGE_SYSTEM` down by two. Enum and `pages[]` were edited in lockstep and it landed first try. The final page is Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle — six buttons, one grid, everything on it actually reaching a function.
 
 ### 8.2 How to add a page (validated 26-7-2026 by adding Spotify 3/3 independently)
 
@@ -692,6 +741,16 @@ Single script, no classes. Flow:
 - **⚠️ `shell=True` fails silently.** A typo'd command is accepted by `cmd`, fails to find the program, returns non-zero — and `Popen` never looks at the exit code. So "nothing happened" does **not** distinguish "the branch was never reached" from "the command string is wrong." Debug by printing immediately before the `Popen`.
 - **`split("+")` moved inside the `KEY:` branch** — it was running for every line regardless of category, doing work only `KEY:` ever consumed.
 - **New `else` branch** prints unknown categories instead of dropping them silently. Previously a `SPOTIFY:` press vanished with no trace.
+
+**`try` / `except` around the dispatch (added 21-8-2026, second session)** — next-steps item 4, closed. The `try` opens after the category/action split and wraps the whole `if`/`elif`/`else` chain; the `except` prints and lets the loop continue.
+
+- **Deliberately `except Exception as e`, not a bare `except:`.** Python's error classes hang off `BaseException`, and `KeyboardInterrupt` and `SystemExit` sit *beside* `Exception` rather than under it. A bare except swallows Ctrl+C, so the handler would print "error, carry on", loop, and the script would become unkillable from the terminal. `except Exception` leaves that path out.
+- **`readline()`, the decode and the split stay outside the `try`.** If the port itself dies that should be loud, not retried silently forever.
+- **`continue` inside a `try` is fine** — it is not an exception, so the `try` does not intercept it; it goes straight to the top of the `while`. Relevant because the `KEY:` branch's unresolved-key guard uses one.
+- **What it buys:** the blast radius from 4.33/4.36 is gone. An exception in *any* branch now costs one printed line instead of the entire companion app — Discord keybinds, `SHELL:` buttons and all.
+- **Improvement worth making:** the message is currently `f'error: {e}'`, which says what broke but not which press caused it. `f"error on {line}: {type(e).__name__}: {e}"` adds the offending line (still in scope) and the exception class, which `{e}` alone drops.
+
+**ESP32 boot noise reaching the `else` branch (diagnosed 21-8-2026, not a bug).** Launching the app prints half a dozen `cannot find the given category:` lines — `SPIWP`, `clk_drv`, `mode`, `load`. Opening the serial port toggles DTR/RTS, which **resets the board**, so the ROM bootloader's own startup chatter arrives as the first few lines. Those strings happen to contain colons, so they pass the `if ":" not in line` guard, split into a nonexistent category, and get correctly reported by the `else`. The `else` is doing its job. Options if it ever becomes annoying: leave it (it is also proof the board really did reset); or `time.sleep(2)` then `connection.reset_input_buffer()` before the loop, to discard the chatter rather than parse it. **Left alone for now.**
 
 **Dispatch design decision (2-8-2026): keep `if`/`elif`, do NOT build a category dict.** Reasoning, since the instinct to mirror `KEY_NAMES` is natural: `KEY_NAMES` maps **data to data**, has many uniform entries, and grows every time a keybind is added — exactly what a dict is for. Categories map a name to **behaviour**, the set is bounded at ~4 by protocol v3's own logic, and the branch bodies are not uniform (`SHELL:` is one line; `KEY:` is split → resolve → validate → execute; `SPOTIFY:` will need a client built at startup plus its own second-level dispatch). Forcing those into a dict means every value becomes a function with a matching signature — a real structure, not just a tidier `if`. Plan: extract each branch body into its own function (as already done for `function_resolve_keys` / `function_execute_keybinds`), which makes the eventual `HANDLERS = {"KEY": handle_key, ...}` dispatch table a ten-minute change rather than a restructure. Revisit around the fourth category, when `SPOTIFY:` has shown what those handlers actually need to look like.
 
@@ -843,7 +902,20 @@ Built this session: `function_shuffle_wrapper` (three action strings, one key), 
 
 **Table as of 21-8-2026:** `SHUFFLE`, `SEEKFWD`, `SEEKBACK`, `SHOWDATA`, `PLAYPAUSE`, `NEXT`, `PREV`.
 
-**⚠️ Open: the action-string names have drifted from 8.8 and from the firmware.** The dict uses `PREV` (matches the flashed firmware) and `SEEKFWD`/`SEEKBACK`/`SHUFFLE` (matches 8.8), but this needs a deliberate pass against the firmware's `ButtonDef` strings before the page rebuild, because the two must agree exactly and the lookup is case-sensitive. Intermediate names `SHUFFLE_DECIDE` / `SHUFFLE_TOGGLE` were tried and dropped.
+**Module-level test harness deleted (21-8-2026, second session)** — see 4.40. The file is now imports → functions → wrappers → table → handler, with **nothing that executes at import time**. That is the property `main.py` depends on, and it is now true rather than intended.
+
+**✅ Closed 21-8-2026 (second session): the action strings are reconciled.** The reconciliation pass ran as part of the page rebuild, and the two sides now match exactly:
+
+| Button | Firmware string | Table key | Params |
+|---|---|---|---|
+| Play/Pause | `SPOTIFY:PLAYPAUSE` | `PLAYPAUSE` | — |
+| Previous | `SPOTIFY:PREV` | `PREV` | — |
+| Next | `SPOTIFY:NEXT` | `NEXT` | — |
+| Seek −10 | `SPOTIFY:SEEKBACK:10` | `SEEKBACK` | `"10"` |
+| Seek +10 | `SPOTIFY:SEEKFWD:10` | `SEEKFWD` | `"10"` |
+| Shuffle | `SPOTIFY:SHUFFLE` | `SHUFFLE` | — |
+
+Dropped from the firmware because no table key exists and none is planned soon: `VOLUP`, `VOLDOWN`, `LIKE`, `REPEAT`, `MUTE`, `QUEUE`. Intermediate names `SHUFFLE_DECIDE` / `SHUFFLE_TOGGLE` were tried and dropped earlier. **The seek strings carry magnitude only** — the wrapper owns the sign (4.41). `SHOWDATA` remains in the table with no button.
 
 ---
 
@@ -931,6 +1003,22 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - **Testing was done at the boundary before wiring, unprompted and thoroughly.** Every table entry was exercised from a scratch harness before `main.py` was touched — including the two paths that kill the read loop (`"DONG"` for the unknown action, `SEEKFWD` with no parameter), and including the case-mismatch and bad-parameter branches. This is the “test at the lowest layer first” habit applying itself without being asked.
 - **⚠️ AI misfires this session, for the catalogue (which now stands at seven):** (1) a garbled explanation of the `params.upper()` normalisation point that had to be re-asked outright (“explain”); (2) a **false alarm about the student's own test output** — claiming that `shuffle:bla` returning an error implied something was secretly normalising case, when a case-mismatched key correctly failing the `not in` check produces exactly that result. Notable because it is **the first entry in the catalogue that was not caught** — it was ignored and moved past rather than challenged. Also (3) a “nit” about reordering the session lookup that was raised as if it mattered and then withdrawn on being questioned (“what does it matter”) — it didn't, much.
 - **AI-authored code this session:** the drift-correction block and the seek/shuffle function bodies were given as sketches after the mechanics were explained, in the established boilerplate-handed-over pattern. Every one of them was typed out by the student with modifications, and the resulting bugs (4.27–4.29) were all in the student's integration of them — which is where the learning is. The `function_get_time_position` structure in particular went through four review rounds before it ran.
+
+**Added 21-8-2026, second session (wiring, firmware rebuild, hardening):**
+
+- **The session's opening question was answered by reading the files, not by asking.** The handoff notes flagged one unverified claim — whether `spotify_functions.py` was actually working from `main.py`. The code settled it: the import and the `SPOTIFY` branch were both there, but the handler was never awaited (4.39), so the wiring existed and could not have worked. Worth noting as method: *"has this been done?"* was a question about a file, and files can be read.
+- **The log was wrong again, and again in the same direction.** 4.38 recorded the `{target:2f}` print as deleted. It hadn't been. That is now two confident past-tense claims in this document that didn't describe the code (cf. the 2.3 "migration complete" note, caught 17-8), and both were written by the AI. The generalisation earned on 17-8 holds: **a project log's summary lines are exactly where drift hides**, and the fix is to check the file rather than the log.
+- **The student pushed back on the review's tone, and was right.** Direct quote: *"stop calling the amount of occurrences I made a mistake, it is very pety."* The reviews had been tagging findings with how many times a similar thing had happened before ("fifth occurrence of this pattern"). Counting recurrences is useful *in this log*, where the point is to see patterns over months; it is not useful attached to a live review, where it adds nothing to the fix and reads as scorekeeping. **Recorded because the correction improved the working relationship and cost nothing** — and because it is a real distinction between documentation and feedback that the AI had collapsed.
+- **A flagged "bug" was overruled and kept as a feature.** `print(f"seeking to target: ...")` had been flagged in four consecutive sessions. The student's answer: *"I WANT the seeking to target to stay in there. I find it nice to have."* Correct on the merits — seek is the one button whose effect is invisible without looking at Spotify, so the print is the only feedback it has. Third style item now deliberately kept over a flag (`return print(...)`, the one-line `if`, this). The pattern is consistent enough to state as a rule: **flag it once, take the answer, stop.**
+- **`COUNT(arr)` finally landed — on the fifth session, and only once it was explained.** The student asked outright: *"what is this COUNT(arr) that is constantly brought up?"* It had been recommended in four consecutive next-steps lists and **never once explained**, which is precisely why it never got built. The explanation that worked was the failure mode, not the syntax: too-low count hides buttons, too-high walks off the array and hands garbage to `lv_label_set_text` as a string pointer. **This is the same meta-failure the log has now catalogued four times** (`COUNT` itself, the missing `await`, lambdas, `params=None`): *repeating a recommendation is not explaining it*, and the fix each time has been to describe the mechanism. Notable that the break came from the student asking, not from the AI noticing.
+- **"Give me the code, I don't get it" — and that was the right call.** A `sizeof`-division macro is boilerplate with no decision in it; there is nothing to discover by retyping it. Consistent with the LVGL-plumbing precedent from 26-7. The *understanding* that mattered (why a macro and not a function; why it can't work inside `buildPage` where the array has decayed to a pointer) was separable from the typing, and was covered.
+- **A clarifying question prevented a real breakage.** Asked *"so I should put everything into one big `if __name__` statement?"* — which is exactly what a half-understood explanation would have produced, and it would have emptied the module: the `def`s and the dispatch table must run at import or `main.py` gets nothing. The question forced the useful distinction (**definitions run at import; execution goes under the guard**) that the original explanation had skipped.
+- **The `try`/`except` was tested by deliberately breaking the thing it guards.** The student inserted a bogus name into `spotify_functions.py`, pressed Play/Pause, and watched the app print `NameError` three times and keep running. Testing the guard rather than trusting it, and the same instinct as the 17-8 "let's just see what happens" on the seek clamp. Also the first direct evidence for 4.33's blast-radius argument: before the guard, that one press would have taken Discord, the keybinds and the System page down with it.
+- **First deletion in the firmware, and the ordering trap was dodged.** Collapsing Spotify from three pages to one meant removing two enum entries and two `pages[]` rows, which shifts every later page index. 8.2 has warned about this since July, but every previous edit had been an *addition*. Landed first try.
+- **Three bugs in the page rebuild, all caught before flashing** (4.41). The one worth keeping is `SEEKBACK:-10`: the wrapper already negates, so the sign in the string cancelled it and the back button would have seeked forward. It is 8.9's wrapper rule seen from the other side — **if the wrapper owns a convention, the wire string must not encode it too.**
+- **AI misfire this session, for the catalogue (now at eight).** Asked *"is this a problem?"* about the startup output, the answer described the symptom and the mechanism accurately but never said the obvious thing — *that's your scratch harness, it's disposable, delete it*. Two further turns then went into how to keep it running safely (`if __name__ == "__main__"`), which was solving a problem the student didn't have. The student's *"why didn't you say that"* was fair, and their follow-up — *"understood that is on me"* — was not: the question was well-formed and the answer was incomplete. **Recorded because the failure shape is specific and repeatable: naming a thing is not the same as saying what it is for.**
+- **Priorities were set by the student, with reasons, against the log's own ordering.** The next-steps list had repeat and `pycaw` volume ahead of OBS. Both were deprioritised: repeat as low-value right now, and volume because `pycaw` moves the *mixer* rather than Spotify's own slider — *"might use API way for that, to have it done proper"* — which re-opens 2.6 rather than resolving it. **That is a real engineering judgement, not avoidance:** it identifies that the cheap option delivers a subtly different feature, and declines to build it on that basis. OBS chosen instead, and it is the last integration with no shortcut available.
+- **AI-authored code this session:** the `COUNT` macro and the rewritten `pages[]` table (boilerplate, given on request). Everything else was the student's — the `asyncio.run()` wiring, the whole Spotify page rebuild, and the `try`/`except` block, which was submitted correct on the first pass with only the error-message detail (include the offending line and the exception class) suggested afterwards.
 
 ---
 
@@ -1052,26 +1140,36 @@ This is precisely why 4.16 was confusing: registration and invocation are separa
 
 ## 12. Immediate Next Steps for Next Session
 
-*(as of 21-8-2026)*
+*(as of 21-8-2026, end of second session)*
 
-**Done 18/21-8-2026:** `spotify_functions.py` is **built, tested and wired**. The module split from next-steps item 1 is complete, the second-level dispatch dict from item 2 exists with the uniform `func(session, params=None)` signature, and parameterised actions work: `SEEKFWD:10`, `SEEKBACK:10`, `SHUFFLE`, `SHUFFLE:ON`, `SHUFFLE:OFF` all verified from a scratch harness, plus `PLAYPAUSE`, `NEXT`, `PREV`, `SHOWDATA` and both failure branches (unknown action, missing/bad parameter). Seven new hiccups (4.32–4.38), one new architecture section (8.9), two new parked-with-reasons decisions (2.7 Web API second backend, 2.8 album art). Committed at the working checkpoint.
+**Done this session — four items closed, three of them long-outstanding:**
 
-**Still true and worth stating plainly:** only **PLAYPAUSE / NEXT / PREV** are reachable from the *device*. The Spotify page still sends `VOLUP` / `VOLDOWN` / `LIKE`, which no longer even reach a branch — they hit the `action not recognised` guard. Everything else is reachable from the app but has no button.
+- **`main.py` awaits the handler** (4.39). `asyncio.run(...)` around the `SPOTIFY` branch; the module was imported but its coroutine was never driven, so every Spotify press had been doing nothing.
+- **The Spotify page rebuild** (was item 3). Three pages → one, six buttons, action strings reconciled against `SPOTIFY_FUNCTIONS`. **All six verified on hardware:** Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Seek and shuffle are pressable from the device for the first time.
+- **`COUNT(arr)`** (was item 2). Outstanding for five sessions. Every `pages[]` row and `pageCount` itself now compute their length.
+- **`try`/`except` around the dispatch** (was item 4). `except Exception as e`, so a bad action string costs one printed line instead of the whole companion app.
 
-1. **Finish the function set while the shape is fresh** — repeat (three-state; needs its own enum import and the same `repr()` check as 4.29, since guessing the comparison has already cost two rounds), and stop / play / pause (trivial). Both slot straight into the table as `async def f(session, params=None)`; repeat probably wants a wrapper like shuffle's, since `REPEAT` / `REPEAT:ONE` / `REPEAT:ALL` / `REPEAT:OFF` collapse to one key.
-2. **`COUNT(arr)` macro** — `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`. Outstanding for four sessions. The hand-typed count in `pages[]` is an unchecked promise about an array and `buildPage` trusts it completely, because a decayed pointer carries no length. **Too low** hides buttons (harmless, happened twice); **too high** reads past the end and dereferences garbage as a string pointer (crash or reboot loop). Item 3 below is the first time this project will *shrink* an array — the dangerous direction. The macro only works where the real array type is in scope: `COUNT(page->buttons)` would compile and be wrong.
-3. **Rebuild the Spotify pages as one page** (2.5). Six buttons: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Deletes `PAGE_SPOTIFY2`/`PAGE_SPOTIFY3`, the `prevPage`/`nextPage` chain, the "n/m" titles and the placeholder page. ⚠️ **First: reconcile the action strings** (8.9) — the firmware's `ButtonDef` strings and the `SPOTIFY_FUNCTIONS` keys must match exactly, the lookup is case-sensitive, and the seek buttons now need the `:10` parameter in the string. ⚠️ `COUNT` fixes the counts but **not** the enum/`pages[]` ordering trap from 8.2 — deleting two rows from the middle shifts every later page index, so the enum must be edited in lockstep. This is the step that finally makes seek and shuffle pressable.
-4. **Harden `main.py`'s dispatch against exceptions** (4.33, 4.36). The `while True` loop has no `try`/`except`, so any unhandled exception in *any* category kills the whole app — every button on the device, not just the offending one. The per-wrapper guards fix the two known cases; a `try`/`except` around the dispatch fixes the class. Small, and it protects everything built so far.
-5. **Spotify volume via `pycaw`** (2.6) — still the easiest thing left: synchronous, no auth, real Python docs, find-by-process-name already familiar from `function_find_spotify`. Note it will *not* need the async wrapper treatment, which makes it the first table entry where the uniform-`async` rule is a genuine cost rather than a freebie — decide then whether a sync entry gets an async wrapper (the `GETTIME` question from 8.9, deferred once already). Watch for Spotify holding multiple audio sessions, and for the app having *no* audio session after silence.
-6. **Decide whether Like earns the Web API** — unchanged and still open, and now cross-referenced with 2.7: doing it for Like alone is also the cheapest way to get the OAuth experience without duplicating a single working function.
-7. **Two-way protocol** (roadmap item 6) — the gate for a lot of parked work. SMTC has **change events**, so this may be "react to a callback" rather than "poll on a timer". This is also where the dispatcher's contract changes from fire-and-forget to caring about return values, which is when `GETTIME` and `SHOWDATA` become real table entries. ⚠️ Carry the drift flag from 8.7 into the interface work: any position shown is approximate (0.5–4 s) and must be communicated as such. ⚠️ Not the ten-minute change it looks like — `readline()` blocks, and `async` alone doesn't change that (`asyncio.to_thread()`, `pyserial-asyncio`, or a reader thread + queue).
-8. **OBS** (`obsws-python`) — the last integration with no shortcut available. The parameterised-action work means `OBS:SCENE:1` needs no protocol decision; the second-level split idiom now exists *and* has a working reference implementation in `function_handle_spotify_functions`.
-9. **Async is still the declared weak point, but visibly less so.** The coroutine-never-awaited pattern recurred (the missing `await` on `function_find_spotify`) and took four flags to land — but the student is now fluent with `_async` as a contract, and the sync-vs-async table question in 8.9 was reasoned about correctly and unprompted. Keep taking it in small doses through items 5 and 7 rather than in one lump.
-10. **Python tidy-up** (optional, unchanged): align naming to snake_case (currently mixed; the `function_` prefix and the new `_wrapper` suffix are deliberate project conventions — do the realignment as its own commit, not halfway); auto-detect the COM port via the CP2102's USB VID/PID (`0x10C4`/`0xEA60`) instead of hardcoding COM13; wrap the port open in a retry so unplugging doesn't kill the script.
-11. **Comment the machine-specific strings** (8.5) — still outstanding. Username path, PATH dependency and self-assigned Discord keybinds.
-12. **Small leftovers in `spotify_functions.py`:** the comment above `function_try_seek` still names `function_seek_forward` / `function_seek_backward` (renamed since); `float(offset)` re-converts a value that is already a float; the duplicated error-message string in the two seek wrappers will drift if one is ever reworded.
-13. **Parked with named triggers (all still live, none dropped):**
-    - **Web API as a second backend** (2.7) — revisit when a feature SMTC cannot reach is actually wanted (Like, playlists, queue, album art), not for position or track metadata. The student is a fan of this idea; it is parked, not rejected.
-    - **Album art on the display** (2.8) — strictly behind item 7; needs a binary transfer mode and a memory-budget review. ~2 s per cover at 115200 baud.
-    - **`GETTIME` as a table entry** (8.9) — behind item 7.
-    - PTT / hold-state would need `KEYDOWN:`/`KEYUP:` (8.4); sequential combos would need a `;` separator (8.3); Discord RPC only after item 7 exists (2.4); the ESP32-S2 mini could be retested, ideally with the VBUS/GND multimeter check that was never actually done.
+Plus: the module-level test harness is gone from `spotify_functions.py` (4.40), so importing it no longer runs a seek attempt.
+
+**Where the project actually stands:** the Spotify integration is *done for the built function set*. Everything the device can press works, and nothing on the page is decorative. Three Spotify things remain unbuilt and all three are **deliberately parked**, not blocked.
+
+1. **OBS via `obsws-python`** — **the student's choice for next session**, and the last integration with no shortcut available. Starting position is unusually good:
+   - Six action strings already exist in the firmware (`OBS:SCENE:1`, `SCENE:2`, `STREAM`, `RECORD`, `MIC`, `DESKTOP`) and already arrive at `main.py`'s `else` branch today.
+   - `OBS:SCENE:1` needs **no protocol decision** — the parameterised-action idiom is built and has a working reference implementation in `function_handle_spotify_functions`.
+   - Expect `obs_functions.py` to mirror the Spotify module: functions → wrappers → `OBS_FUNCTIONS` table → handler, with the same `func(session, params=None)`-shaped invariant. The open question is what plays the role of `session` — the websocket client is created once and *stays* connected, unlike the per-press SMTC lookup, so connection lifetime and reconnect-after-OBS-restart are the new design questions.
+   - Websocket auth is local (password in OBS settings), not OAuth. Test at the lowest layer first, as always: connect and list scenes from a scratch script before any of it reaches `main.py`.
+2. **Spotify volume — decide the mechanism before building** (2.6, now re-opened). `pycaw` moves Spotify's share of the Windows mixer; the Web API moves Spotify's own slider. The student wants the second. That makes volume, rather than Like, the feature that would justify the OAuth stack (2.7), so cost both paths together rather than separately. **Nothing to build until this is decided.**
+3. **Repeat, and stop/play/pause** — deprioritised by the student, not dropped. When it comes back: repeat is three-state, needs its own enum import, and needs the `repr()` check from 4.29 before guessing the comparison — guessing has already cost two rounds once. It probably wants a wrapper like shuffle's, since `REPEAT` / `REPEAT:ONE` / `REPEAT:ALL` / `REPEAT:OFF` collapse to one key.
+4. **Two small `main.py` improvements**, both a line each: include the offending `line` and `type(e).__name__` in the `except` message; and (optional) `time.sleep(2)` + `connection.reset_input_buffer()` before the loop to swallow the ESP32 boot chatter instead of parsing it into `cannot find the given category` lines.
+5. **Decide whether Like earns the Web API** — unchanged, and now second in the queue behind volume for the same OAuth stack.
+6. **Two-way protocol** (roadmap item 6) — the gate for a lot of parked work. SMTC has **change events**, so this may be "react to a callback" rather than "poll on a timer". This is also where the dispatcher's contract changes from fire-and-forget to caring about return values, which is when `GETTIME` and `SHOWDATA` become real table entries. ⚠️ Carry the drift flag from 8.7 into the interface work: any position shown is approximate (0.5–4 s) and must be communicated as such. ⚠️ Not the ten-minute change it looks like — `readline()` blocks, and `async` alone doesn't change that (`asyncio.to_thread()`, `pyserial-asyncio`, or a reader thread + queue).
+7. **Async is still the declared weak point, but visibly less so.** This session's version of the coroutine bug was the *boundary* case (sync code calling an `async def`, 4.39) rather than a missing `await` inside async code — and `asyncio.run()` as the crossing is now understood as the answer, not a formula. That same call shape is what OBS will need if `obsws-python` turns out to be async. Keep taking it in small doses through items 1 and 6.
+8. **Python tidy-up** (optional, unchanged): align naming to snake_case (currently mixed; the `function_` prefix and the `_wrapper` suffix are deliberate project conventions — do the realignment as its own commit, not halfway); auto-detect the COM port via the CP2102's USB VID/PID (`0x10C4`/`0xEA60`) instead of hardcoding COM13; wrap the port open in a retry so unplugging doesn't kill the script.
+9. **Comment the machine-specific strings** (8.5) — still outstanding. Username path, PATH dependency and self-assigned Discord keybinds.
+10. **Small leftovers in `spotify_functions.py`:** the comment above `function_try_seek` still names `function_seek_forward` / `function_seek_backward` (renamed since); `float(offset)` re-converts a value that is already a float; the duplicated error-message string in the two seek wrappers will drift if one is ever reworded; `{target:2f}` in the seek print wants its missing dot (the print itself **stays** — 4.38).
+11. **Firmware leftovers:** the Spotify labels read `"Seek -10"` and `"Seek 10"` — inconsistent form. The `prevPage`/`nextPage` chain in `PageDef` is now **unused** by every page, since Spotify was the only chained category; keep it (the next multi-page category gets it free) but know that it is currently dead weight and untested by anything on the device.
+12. **Parked with named triggers (all still live, none dropped):**
+    - **Web API as a second backend** (2.7) — now most likely to be un-parked by **volume** rather than Like. Still parked, still liked.
+    - **Album art on the display** (2.8) — strictly behind item 6; needs a binary transfer mode and a memory-budget review. ~2 s per cover at 115200 baud.
+    - **`GETTIME` as a table entry** (8.9) — behind item 6.
+    - **Config-driven layout / layout editor** (roadmap item 9) — the long-term destination that makes `SHELL:` and `KEY:` strings portable (8.5).
