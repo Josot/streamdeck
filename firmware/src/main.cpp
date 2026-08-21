@@ -24,6 +24,10 @@ lv_display_t *disp;
 // Page & button definitions (the "data" the whole UI is built from)
 // ============================================================
 
+// Number of elements in an array, computed by the compiler instead of typed by
+// hand. Only valid where the real array type is in scope — a pointer has no length.
+#define COUNT(a) (sizeof(a) / sizeof((a)[0]))
+
 // One button on a page. Two kinds share this struct:
 // - action button: 'action' is the exact string sent over serial on press
 // - navigation button: 'action' is NULL, 'targetPage' is the page it opens
@@ -88,7 +92,7 @@ static const ButtonDef spotifyButtons[] = {
   { LV_SYMBOL_PREV       "\nPrevious",   "SPOTIFY:PREV",      0 },
   { LV_SYMBOL_NEXT       "\nNext",       "SPOTIFY:NEXT",      0 },
   { LV_SYMBOL_LEFT       "\nSeek -10",   "SPOTIFY:SEEKBACK:10",  0 },
-  { LV_SYMBOL_RIGHT      "\nSeek 10",     "SPOTIFY:SEEKFWD:10",   0 },
+  { LV_SYMBOL_RIGHT      "\nSeek +10",    "SPOTIFY:SEEKFWD:10",   0 },
   { LV_SYMBOL_SHUFFLE    "\nShuffle",     "SPOTIFY:SHUFFLE",      0 },
 };
 
@@ -120,16 +124,16 @@ static const ButtonDef systemButtons[] = {
 
 // title, buttons, count, parent, prevPage, nextPage
 static const PageDef pages[] = {
-  { "Home",        homeButtons,     6, -1,        -1,           -1 },
-  { "Keybinds",    keyButtons,      6, PAGE_HOME, -1,           -1 },
-  { "Discord",     discordButtons,  6, PAGE_HOME, -1,           -1 },
-  { "Spotify",     spotifyButtons,  6, PAGE_HOME, -1,           -1 },
-  { "OBS",         obsButtons,      6, PAGE_HOME, -1,           -1 },
-  { "Media",       mediaButtons,    6, PAGE_HOME, -1,           -1 },
-  { "System",      systemButtons,   5, PAGE_HOME, -1,           -1 },
+  { "Home",     homeButtons,    COUNT(homeButtons),    -1,        -1, -1 },
+  { "Keybinds", keyButtons,     COUNT(keyButtons),     PAGE_HOME, -1, -1 },
+  { "Discord",  discordButtons, COUNT(discordButtons), PAGE_HOME, -1, -1 },
+  { "Spotify",  spotifyButtons, COUNT(spotifyButtons), PAGE_HOME, -1, -1 },
+  { "OBS",      obsButtons,     COUNT(obsButtons),     PAGE_HOME, -1, -1 },
+  { "Media",    mediaButtons,   COUNT(mediaButtons),   PAGE_HOME, -1, -1 },
+  { "System",   systemButtons,  COUNT(systemButtons),  PAGE_HOME, -1, -1 },
 };
 
-static const int pageCount = sizeof(pages) / sizeof(pages[0]);
+static const int pageCount = COUNT(pages);
 
 // One LVGL screen object per page, filled in during setup()
 static lv_obj_t *screens[pageCount];
