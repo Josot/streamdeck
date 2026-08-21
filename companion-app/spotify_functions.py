@@ -56,11 +56,19 @@ async def function_try_seek(session, offset_seconds):
     return await session.try_change_playback_position_async(ticks)
 
 async def function_seek_wrapper_forward(session, params=None):
-    return await function_try_seek(session, float(params))
+    try: # guard test to see if param can indeed be a float.
+        offset = float(params)
+    except(ValueError, TypeError):
+        return print(f'current param: {params} does not work. For seek you need a number in seconds. e.g 10.5 or 4')
+    return await function_try_seek(session, float(offset))
 
 async def function_seek_wrapper_backward(session, params=None):
-    return await function_try_seek(session, -float(params))
+    try: # guard test to see if param can indeed be a float.
+        offset = float(params)
+    except(ValueError, TypeError):
+        return print(f'current param: {params} does not work. For seek you need a number in seconds. e.g 10.5 or 4')
 
+    return await function_try_seek(session, -float(offset))
 
 async def function_show_now_playing(session, params = None):
 
@@ -120,14 +128,3 @@ async def function_handle_spotify_functions(action):
 # --- test 4: spotify function handler ---
 line = "SEEKFWD"
 asyncio.run(function_handle_spotify_functions(line))
-
-# tested:
-# PLAYPAUSE works
-# SEEKFWD works
-# SEEKBACK works
-# SHUFFLE works
-# SHUFFLE:ON works
-# SHUFFLE:OFF works
-# DONG returns error correct
-# shuffle:bla returns error correct
-# 
