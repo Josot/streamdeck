@@ -3,6 +3,7 @@ import subprocess # Used for shell catagory
 from pynput.keyboard import Controller, Key # used to simulate keyboard presses
 import asyncio
 import spotify_functions
+import obs_functions
 
 keyboard = Controller()
 
@@ -87,6 +88,9 @@ while True:
 
         elif category == "SPOTIFY":
             asyncio.run(spotify_functions.function_handle_spotify_functions(action))
+
+        elif category == "OBS":
+            obs_functions.function_handle_obs_functions(action)
 
         else:
             print(f"cannot find the given category: {category}")

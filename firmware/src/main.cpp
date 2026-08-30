@@ -56,6 +56,7 @@ enum {
   PAGE_DISCORD,
   PAGE_SPOTIFY,
   PAGE_OBS,
+  PAGE_OBS2,
   PAGE_SCENES,
   PAGE_MEDIA,
   PAGE_SYSTEM
@@ -98,19 +99,25 @@ static const ButtonDef spotifyButtons[] = {
 };
 
 static const ButtonDef obsButtons[] = {
-  { LV_SYMBOL_IMAGE  "\nScenes",  NULL, PAGE_SCENES },
-  { LV_SYMBOL_UPLOAD "\nStream",  "OBS:STREAM",  0 },
-  { LV_SYMBOL_VIDEO  "\nRecord",  "OBS:RECORD",  0 },
-  { LV_SYMBOL_MUTE   "\nMic",     "OBS:MIC",     0 },
-  { LV_SYMBOL_AUDIO  "\nDesktop", "OBS:DESKTOP", 0 },
+  { LV_SYMBOL_IMAGE  "\nScenes",    NULL, PAGE_SCENES },
+  { LV_SYMBOL_UPLOAD "\nStream",    "OBS:STREAM",      0 },
+  { LV_SYMBOL_VIDEO  "\nRecord",    "OBS:RECORD",      0 },
+  { LV_SYMBOL_PAUSE  "\nRec pause", "OBS:RECORDPAUSE", 0 },
+  { LV_SYMBOL_SAVE   "\nClip",      "OBS:CLIP",        0 },
 };
 
-static const ButtonDef sceneButtons[] = {
-  { LV_SYMBOL_UPLOAD "\nStart stream\nScene 1", "OBS:SCENE:Start stream", 0 },
-  { LV_SYMBOL_STOP   "\nEnd stream\nScene 2",   "OBS:SCENE:End stream",   0 },
-  { LV_SYMBOL_VIDEO  "\nCamera\nScene 3",       "OBS:SCENE:Camera",       0 },
-  { LV_SYMBOL_IMAGE  "\nGame\nScene 4",         "OBS:SCENE:Game",         0 },
-  { LV_SYMBOL_PAUSE  "\nPauze\nScene 5",        "OBS:SCENE:Pauze",        0 },
+static const ButtonDef obs2Buttons[] = {
+  { LV_SYMBOL_MUTE      "\nMute mic",     "OBS:MUTE:Mic/Aux",       0 },
+  { LV_SYMBOL_AUDIO     "\nMute desktop", "OBS:MUTE:Desktop Audio", 0 },
+  { LV_SYMBOL_EYE_CLOSE "\nHide webcam",  "OBS:HIDETOGGLE:Webcam",  0 },
+};
+
+static const ButtonDef obsScenes[] = {
+  { LV_SYMBOL_UPLOAD "\nStart stream", "OBS:SCENE:Start stream", 0 },
+  { LV_SYMBOL_STOP   "\nEnd stream",   "OBS:SCENE:End stream",   0 },
+  { LV_SYMBOL_VIDEO  "\nCamera",       "OBS:SCENE:Camera",       0 },
+  { LV_SYMBOL_IMAGE  "\nGame",         "OBS:SCENE:Game",         0 },
+  { LV_SYMBOL_PAUSE  "\nPauze",        "OBS:SCENE:Pauze",        0 },
 };
 
 static const ButtonDef mediaButtons[] = {
@@ -136,8 +143,9 @@ static const PageDef pages[] = {
   { "Keybinds", keyButtons,     COUNT(keyButtons),     PAGE_HOME, -1, -1 },
   { "Discord",  discordButtons, COUNT(discordButtons), PAGE_HOME, -1, -1 },
   { "Spotify",  spotifyButtons, COUNT(spotifyButtons), PAGE_HOME, -1, -1 },
-  { "OBS",      obsButtons,     COUNT(obsButtons),     PAGE_HOME, -1, -1 },
-  {"OBS Scenes",sceneButtons,   COUNT(sceneButtons),   PAGE_OBS,  -1, -1 },
+  { "OBS 1/2",  obsButtons,     COUNT(obsButtons),     PAGE_HOME, -1, PAGE_OBS2 },
+  { "OBS 2/2",  obs2Buttons,    COUNT(obs2Buttons),    PAGE_HOME, PAGE_OBS, -1 },
+  { "Scenes",   obsScenes,      COUNT(obsScenes),       PAGE_OBS, -1, -1 },
   { "Media",    mediaButtons,   COUNT(mediaButtons),   PAGE_HOME, -1, -1 },
   { "System",   systemButtons,  COUNT(systemButtons),  PAGE_HOME, -1, -1 },
 };
