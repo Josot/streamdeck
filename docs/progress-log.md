@@ -637,7 +637,7 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 3c | LVGL setup (replaces manual drawing/hit-testing with a real UI library) | ✅ Done — library installed, config wired, display flush + touch read callbacks working, DRAM overflow fixed, single button + label rendering and confirmed on screen |
 | 3d | LVGL: generalize to full 6-button grid using LVGL widgets | ✅ Done (26-7-2026) — went straight to the full data-driven multi-page version, skipping the intermediate single-page 6-button step |
 | 3e | LVGL: styling (background/button colors) | ✅ Done (26-7-2026) — color constants centralized, pressed-state feedback via `LV_STATE_PRESSED` styles confirmed on hardware (small touch-to-highlight delay, within acceptable range for resistive touch + LVGL's polling interval). `lv_refr_now` rule obsolete per 4.16. |
-| 3f | LVGL: multi-page navigation (home → category pages → paged categories) | ✅ Done (26-7-2026) — 9 pages working on hardware incl. a 3-page Spotify chain. **Collapsed to 7 pages on 21-8-2026** when the Spotify chain became one page; the prev/next chain mechanism is now unused but retained in `PageDef`/`buildPage` for the next category that needs it. |
+| 3f | LVGL: multi-page navigation (home → category pages → paged categories) | ✅ Done (26-7-2026) — originally 9 pages incl. a 3-page Spotify chain, collapsed to 7 when Spotify became one page, then **back to 9 with the OBS build**: a 2-page OBS chain plus a Scenes page. **The OBS build exercised both link mechanisms at once for the first time** — prev/next between OBS 1/2 and 2/2 (siblings), and parent/back from Scenes to OBS (genuine child). See 8.1 for the `parentPage` convention that had to be restated. |
 | 4 | USB HID | ❌ **Dropped as a requirement** — companion app handles keystroke simulation instead (see section 2) |
 | 5 | Wire button grid → serial | ✅ **Done (1-8-2026)** — action strings confirmed arriving in the Python app; protocol upgraded to v3 (see 2.3) |
 | 6 | Two-way serial protocol (status pushes back to display: track info, scene state, mute state) | ⬜ Not started |
@@ -646,7 +646,7 @@ Decided on a monorepo with firmware and companion app as clean sibling folders, 
 | 7c | Python companion app — Spotify | ✅ **Done for the built function set (21-8-2026, second session).** `spotify_functions.py` is imported *and awaited* by `main.py` (4.39), and **all six device buttons are verified working on hardware**: Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. The firmware and the `SPOTIFY_FUNCTIONS` keys now agree exactly. `SHOWDATA` works from the app but has no button (it returns metadata the dispatcher discards — real at roadmap item 6). Deliberately **not** built: repeat (deprioritised by the student), volume (2.6 re-opened, Web API vs `pycaw` undecided). |
 | 7e | Spotify volume via `pycaw` (per-app audio mixer) | ⬜ Not started — decided 17-8-2026, see 2.6. Sync, no auth, simplest integration left. |
 | 7d | Discord — migrate to `KEY:` global keybinds | ✅ **Done (2-8-2026)** — 6 buttons, all verified on hardware with Discord unfocused. No API needed; see 2.4 for why, and 8.4 for what keybinds can't reach. |
-| 8 | Python companion app — OBS (`obsws-python`) | ⬜ Not started — **chosen by the student as the next piece of work (21-8-2026).** Six action strings already exist in the firmware and already reach `main.py`'s `else` branch. |
+| 8 | Python companion app — OBS (`obsws-python`) | ✅ **Done (21-8-2026, second session)** — `obs_functions.py` built and wired; see 8.10. Seven table entries across three firmware pages: `SCENE` (5 scenes), `STREAM`, `RECORD`, `RECORDPAUSE`, `MUTE` (mic + desktop), `HIDETOGGLE`, `CLIP`. Scene switching verified end-to-end from the touchscreen. ⚠️ `RECORDPAUSE` cannot work until OBS's Recording Quality is changed off "Same as stream", and `CLIP` needs the replay buffer running — both are OBS settings, not code. |
 | 9 | Polish (icons, config format, case, etc.) | ⬜ Not started — roadmap idea: long-term, a layout editor in the companion app (device stores a layout pushed from the PC) so button changes never require compiling firmware; see section 12 |
 
 **Toolchain/infra status (all done, not part of the numbered roadmap but consumed real time):**
@@ -698,6 +698,10 @@ All UI content lives in `const` data tables at the top of the file; one generic 
 - ✅ **`COUNT(arr)` is in (21-8-2026, second session), after being outstanding for five.** `#define COUNT(a) (sizeof(a) / sizeof((a)[0]))`, declared at the top of the data section, used for every row of `pages[]` and for `pageCount` itself. The `buttonCount` field still exists and `buildPage` is unchanged — the only difference is that the number is now computed by the compiler instead of typed by hand, so it cannot drift from the array. **The `pages[]` `buttonCount` had previously been forgotten twice in one session** (System and Discord), which was the single most repeated mistake in the project.
   - **Why it must be a macro, not a function:** `sizeof` needs the real array type in scope. Inside `buildPage`, `page->buttons` is a `const ButtonDef *` — the length is gone, and `COUNT(page->buttons)` would compile happily and evaluate to `0`. It only works at the `pages[]` table, where `spotifyButtons` is still visibly an array.
   - The inner parens in `(a)[0]` and the outer parens around the whole expression are the standard macro-hygiene reflex: a macro is textual substitution, so without them a caller's surrounding operators can regroup the expansion.
+
+- **The OBS build (21-8-2026, second session) put the page count back to 9** and used both linking mechanisms in one category for the first time: `PAGE_OBS` ↔ `PAGE_OBS2` as a prev/next sibling chain, and `PAGE_SCENES` hanging off `PAGE_OBS` as a genuine child. **`PAGE_SCENES` is also the first page mixing a nav button with action buttons** — `buildPage` needed no change, because it already branches per button on `action != NULL`.
+  - **The `parentPage` convention had to be restated.** Every earlier page used `PAGE_HOME` as parent, which read like a rule but was really an artefact: chained siblings have no meaningful parent *among themselves*, so home was the only sensible target. Scenes is a real child, so its parent is `PAGE_OBS`. Stated properly: **back goes to the logical parent; chained siblings use home because they have none.**
+  - ⚠️ **The enum↔`pages[]` correspondence is still completely unguarded, and it broke once this session.** A paste dropped `sceneButtons[]` and its `pages[]` row while leaving `PAGE_SCENES` in the enum — 9 enum entries against 8 array rows. Result: Scenes would have opened Media, Media would have opened System, and System would have indexed `screens[8]` **one past the end of an 8-element array**. Caught in review, never flashed. Worth being explicit that **`COUNT` does not help here**: it guards `buttonCount` against its own array, and nothing checks that the enum and `pages[]` have the same length or order. That correspondence is still held by hand.
 
 - **Spotify collapsed from three pages to one (21-8-2026, second session).** `spotify2Buttons[]`, `spotify3Buttons[]`, `PAGE_SPOTIFY2` and `PAGE_SPOTIFY3` all deleted; the "n/m" titles are gone and the surviving page's `nextPage` is back to `-1`. **This was the project's first array/page *deletion*** — the direction 8.2's ordering trap actually punishes, since removing two rows from the middle shifts `PAGE_OBS`, `PAGE_MEDIA` and `PAGE_SYSTEM` down by two. Enum and `pages[]` were edited in lockstep and it landed first try. The final page is Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle — six buttons, one grid, everything on it actually reaching a function.
 
@@ -917,6 +921,62 @@ Built this session: `function_shuffle_wrapper` (three action strings, one key), 
 
 Dropped from the firmware because no table key exists and none is planned soon: `VOLUP`, `VOLDOWN`, `LIKE`, `REPEAT`, `MUTE`, `QUEUE`. Intermediate names `SHUFFLE_DECIDE` / `SHUFFLE_TOGGLE` were tried and dropped earlier. **The seek strings carry magnitude only** — the wrapper owns the sign (4.41). `SHOWDATA` remains in the table with no button.
 
+### 8.10 `obs_functions.py` and the OBS integration (built 21-8-2026, second session)
+
+**Library: `obsws-python`** (v5 protocol, built into OBS 28+ — no plugin). ⚠️ Not `obs-websocket-py`, which targets the dead v4 protocol; most tutorials online still use it. Same trap as the `winrt` package in 4.23.
+
+**Connection: cached, built lazily.** Module-level `client = None`, and `function_get_client()` builds it on first use and returns the cached one afterwards, with `global client` so the assignment reaches module scope. Three options were weighed:
+
+| Option | Verdict |
+|---|---|
+| Connect at import | Rejected — OBS closed at launch would kill the whole companion app before the read loop starts. 4.31/4.40 again. |
+| **Lazy + cached** | **Chosen.** App starts fine with OBS closed; first press pays the connect. |
+| Connect per press | Rejected, but *not* on speed — see below. |
+
+**The responsiveness argument was raised and did not survive.** A local websocket connect is roughly 5–20 ms (TCP handshake plus the v5 SHA256 challenge-response); a scene switch is 1–2 ms. Per-press connecting would be ~10× the work but still far below the ~50 ms where a button feels laggy. **The real arguments for caching are different:** obs-websocket also *pushes events* (scene changed, stream started), and events only arrive on a connection that stays open — so per-press forecloses roadmap item 6. Plus one failure point instead of one per press. Recorded because the first argument offered (speed) was the weak one and the student picked the connection up on the strong one.
+
+**The module is synchronous — deliberately unlike Spotify.** `ReqClient` has no coroutines, so there is no `async def`, no `await`, and `main.py` calls the handler directly with **no `asyncio.run()`**. Forcing it to match the Spotify module's uniform-async invariant would be cargo-culting; the two branches in `main.py` look different because the two libraries are different.
+
+**Response objects unpack in two steps, and the naming is inconsistent by design of the library:** dot access for the response's own fields (`get_scene_list().scenes`, `get_current_program_scene().scene_name`), but **bracket access for nested contents** (`scene["sceneName"]`), because the library builds attributes for top-level fields and leaves the nested JSON as raw dicts. Verified live rather than assumed — `print(vars(response))` is the way to interrogate an unfamiliar response.
+
+**Functions as built:**
+
+| Table key | Function | Request | Params |
+|---|---|---|---|
+| `SCENE` | `function_set_scene` | `set_current_program_scene` | scene name |
+| `STREAM` | `function_stream_toggle` | `toggle_stream` | — |
+| `RECORD` | `function_record_toggle` | `toggle_record` | — |
+| `RECORDPAUSE` | `function_record_pause_toggle` | `toggle_record_pause` | — |
+| `MUTE` | `function_mute_toggle` | `toggle_input_mute` | input name |
+| `HIDETOGGLE` | `function_visibility_toggle` | 4 calls, see below | source name |
+| `CLIP` | `function_save_replay_buffer` | `save_replay_buffer` | — |
+
+**OBS's data model, because it caused the most confusion this session:**
+
+- **Source** — a thing producing picture or sound (webcam, window capture, mic). Exists once, globally, with a name you chose.
+- **Scene** — a layout: which sources are visible, where.
+- **Scene item** — *one source placed in one scene*. The same webcam in `Game` and in `Camera` is **two scene items backed by one source**, each with its own position, size and visible flag.
+
+**Consequence, and the reason `function_visibility_toggle` takes four calls:** a source has no on/off switch. Visibility is a property of the *placement*, not the thing placed — deliberate, so that scenes stay independent layouts. "Turn the webcam off" is not well-formed until you say *off where*. So: current scene → item id for that source in that scene → read enabled → set the opposite. Read-modify-write, same shape as `function_toggle_shuffle`, because neither API offers a toggle.
+
+**The contrast worth remembering: audio mute is global.** `toggle_input_mute` takes only a source name, no scene, because muting is a property of the input itself. Video visibility is per-placement, audio mute is per-source — same app, opposite models.
+
+**Failure modes that are normal, not bugs:**
+
+- `get_scene_item_id` **raises** (code 600, "no scene items were found...") when the source isn't in the current scene. It does not return `None`. Pressing Hide webcam on a scene without the webcam is therefore an exception, caught by `main.py`'s `try`/`except` and printed as a raw obs-websocket error.
+- `RECORDPAUSE` errors when not recording; `CLIP` errors when the replay buffer isn't running.
+- All three are the case for the two-way protocol eventually — the device could grey out what isn't currently valid instead of failing silently into a terminal nobody is watching.
+
+**⚠️ Replay buffer settings — where they actually live (checked in-app, 21-8-2026):**
+
+- **Buffer enable + maximum replay time:** Settings → Output → Replay Buffer. Present in **both** Simple and Advanced output modes (Advanced puts it on its own tab). Memory cost is shown live: 20 s ≈ 14 MB, 50 s ≈ 36 MB, held in RAM continuously while running.
+- **Auto-start with streaming/recording:** **Settings → General**, in the Output section — *not* under Settings → Output, where it looks like it should be. Two wrong guesses were made before this was found by looking.
+- The buffer must be **running** for `CLIP` to do anything; enabling it in settings is not the same as starting it. There is a Start Replay Buffer button in the main window's controls panel.
+
+**⚠️ Also from the Simple-mode Output screen:** *"Recordings cannot be paused if the recording quality is set to Same as stream."* That setting is the current one, so **`RECORDPAUSE` will not work until Recording Quality is changed.** Unresolved at end of session.
+
+**Machine-specific strings, 8.5 territory:** the five scene names, `Mic/Aux`, `Desktop Audio`, and `Webcam` all have to match what is configured in *this* OBS install, character for character. They live in the firmware's `ButtonDef` strings, consistent with how `SHELL:` paths are handled. The websocket password is currently hardcoded in `obs_functions.py` — **must move to a gitignored config or an environment variable before the repo goes public**, and note that a password committed once stays in git history after the line is deleted.
+
 ---
 
 ## 9. Learning Approach / Pedagogical Notes (relevant for portfolio reflection)
@@ -1019,6 +1079,17 @@ This project is explicitly being used as a hands-on learning exercise (student s
 - **AI misfire this session, for the catalogue (now at eight).** Asked *"is this a problem?"* about the startup output, the answer described the symptom and the mechanism accurately but never said the obvious thing — *that's your scratch harness, it's disposable, delete it*. Two further turns then went into how to keep it running safely (`if __name__ == "__main__"`), which was solving a problem the student didn't have. The student's *"why didn't you say that"* was fair, and their follow-up — *"understood that is on me"* — was not: the question was well-formed and the answer was incomplete. **Recorded because the failure shape is specific and repeatable: naming a thing is not the same as saying what it is for.**
 - **Priorities were set by the student, with reasons, against the log's own ordering.** The next-steps list had repeat and `pycaw` volume ahead of OBS. Both were deprioritised: repeat as low-value right now, and volume because `pycaw` moves the *mixer* rather than Spotify's own slider — *"might use API way for that, to have it done proper"* — which re-opens 2.6 rather than resolving it. **That is a real engineering judgement, not avoidance:** it identifies that the cheap option delivers a subtly different feature, and declines to build it on that basis. OBS chosen instead, and it is the last integration with no shortcut available.
 - **AI-authored code this session:** the `COUNT` macro and the rewritten `pages[]` table (boilerplate, given on request). Everything else was the student's — the `asyncio.run()` wiring, the whole Spotify page rebuild, and the `try`/`except` block, which was submitted correct on the first pass with only the error-message detail (include the offending line and the exception class) suggested afterwards.
+
+**Added 21-8-2026, second session, part two (the OBS build):**
+
+- **The domain model was the hard part, not the code.** `obs_functions.py` reached seven working functions in about the time the Spotify module took to reach two, and none of the difficulty was Python. It was OBS's **source / scene / scene item** distinction — the student asked "why can we not just turn off source webcam?", which is the exact right question and has a real answer (visibility is a property of the placement, so scenes stay independent layouts). **Recorded because the pattern generalises:** the SMTC work's hard part was also conceptual (async, `last_updated_time` drift), not syntactic. The APIs are easy; their models are not.
+- **A wrong argument was offered and correctly not bought.** The lazy-cached connection was first justified on *responsiveness*. Challenged directly — *"how much would it cost to do this on each button press? would it cost a lot of time responsiveness?"* — and the honest number (5–20 ms, imperceptible) **defeated the argument that had been given**. The decision stood on different grounds: obs-websocket pushes events, and events need a connection that stays open. The student's *"the protocol thing convinced me"* is the correct reason, and it is a better reason than the one first supplied. **This is the good version of the epistemics problem in section 2** — the claim was checkable, it got checked, and the conclusion survived on a repaired argument rather than the original one.
+- **Two AI misfires in one exchange, both settled by looking rather than arguing.** Asked where the replay buffer's auto-start setting lives: first answer said Advanced output mode, second said Advanced's Replay Buffer tab. Both wrong, and the student produced a screenshot each time. It is actually under **Settings → General**. Cheap to be wrong about, but it is the same shape as 4.29 and 2.8 — **recalled UI layout and recalled API surfaces are the same kind of unreliable**, and the standing rule (send them to the source) should have applied to an app's own settings screen too, not just to Microsoft's docs.
+- **The `params`-as-source-name rename came from a readability question, not a bug.** *"make the code more readable"* on `function_visibility_toggle` produced `source = params`, an alias line whose only job is that three following lines stop saying "param (e.g. webcam)". Related: the student's own comment draft said `get_scene_item_id` checks "if param is in it", which undersells it — it *fetches an id* and **raises** when absent. Precision in a comment matters most where the failure mode is non-obvious.
+- **Naming got negotiated again, and the reasoning was about search-ability.** `function_visibility_toggle` was kept over any variant containing "source" (misleading — it toggles a *scene item*, which is the misconception the comment exists to prevent) or "object" (not an OBS term). Same class of decision as `SHUFFLE` over `SHUFFLE_TOGGLE`.
+- **Two features were correctly declined after being scoped.** "Hide the webcam in *all* scenes" was costed — a loop, plus per-scene `try`/`except` because most scenes don't contain the source, plus the observation that *toggle* is meaningless across mixed states so it would have to be set-not-toggle — and the student's answer was *"just curious, I don't think it is necessary."* Auto-starting the replay buffer from `function_stream_toggle` was similarly declined once it became clear a blind second toggle assumes buffer state always matches stream state. **Both are the 17-8 "don't add defensive code without evidence" instinct applied to features.**
+- **AI-authored code in the OBS build:** the `OBS_FUNCTIONS` dict (on request), the two-line `function_visibility_toggle` skeleton, the `obsScenes[]` / `obs2Buttons[]` arrays, and the corrected `function_get_client()` after four review passes on the student's versions. The student wrote the connection function's first three drafts, every handler, and every other table function.
+- **The `global` keyword was the one genuinely new Python concept**, and it took two passes: first placed at module level (where it does nothing), then correctly inside the function. The failure it prevents is worth keeping — without it, `client = obs.ReqClient(...)` makes `client` local *for the whole function*, so the read on the line above raises `UnboundLocalError`. **The error lands on the read, not the write**, which makes it read as nonsense the first time.
 
 ---
 
@@ -1142,7 +1213,9 @@ This is precisely why 4.16 was confusing: registration and invocation are separa
 
 *(as of 21-8-2026, end of second session)*
 
-**Done this session — four items closed, three of them long-outstanding:**
+**Done this session — five items closed, three of them long-outstanding:**
+
+- **OBS integration built and working** (roadmap item 8, and the item the student chose over the log's own ordering). `obs_functions.py`, seven table entries, three firmware pages, scene switching verified from the touchscreen. See 8.10.
 
 - **`main.py` awaits the handler** (4.39). `asyncio.run(...)` around the `SPOTIFY` branch; the module was imported but its coroutine was never driven, so every Spotify press had been doing nothing.
 - **The Spotify page rebuild** (was item 3). Three pages → one, six buttons, action strings reconciled against `SPOTIFY_FUNCTIONS`. **All six verified on hardware:** Play/Pause, Previous, Next, Seek −10, Seek +10, Shuffle. Seek and shuffle are pressable from the device for the first time.
@@ -1153,11 +1226,12 @@ Plus: the module-level test harness is gone from `spotify_functions.py` (4.40), 
 
 **Where the project actually stands:** the Spotify integration is *done for the built function set*. Everything the device can press works, and nothing on the page is decorative. Three Spotify things remain unbuilt and all three are **deliberately parked**, not blocked.
 
-1. **OBS via `obsws-python`** — **the student's choice for next session**, and the last integration with no shortcut available. Starting position is unusually good:
-   - Six action strings already exist in the firmware (`OBS:SCENE:1`, `SCENE:2`, `STREAM`, `RECORD`, `MIC`, `DESKTOP`) and already arrive at `main.py`'s `else` branch today.
-   - `OBS:SCENE:1` needs **no protocol decision** — the parameterised-action idiom is built and has a working reference implementation in `function_handle_spotify_functions`.
-   - Expect `obs_functions.py` to mirror the Spotify module: functions → wrappers → `OBS_FUNCTIONS` table → handler, with the same `func(session, params=None)`-shaped invariant. The open question is what plays the role of `session` — the websocket client is created once and *stays* connected, unlike the per-press SMTC lookup, so connection lifetime and reconnect-after-OBS-restart are the new design questions.
-   - Websocket auth is local (password in OBS settings), not OAuth. Test at the lowest layer first, as always: connect and list scenes from a scratch script before any of it reaches `main.py`.
+1. **Finish testing the OBS buttons that have never been pressed.** Scene switching is proven end-to-end; the rest are written but unexercised from the device. Two need OBS settings changed first:
+   - ⚠️ **`RECORDPAUSE` cannot work** while Recording Quality is "Same as stream" — OBS says so on the Output settings screen. Change the quality, then test.
+   - ⚠️ **`CLIP` needs the replay buffer running**, which is separate from enabling it. Auto-start is under **Settings → General**; the buffer itself and its duration are under Settings → Output → Replay Buffer.
+   - `MUTE:Mic/Aux` and `MUTE:Desktop Audio` need those exact names to exist in the Audio Mixer panel.
+   - `HIDETOGGLE:Webcam` currently targets a Color Source named `Webcam` added to the `Camera` scene for testing. Real webcam later; the function does not care which.
+   - **Reconnect after an OBS restart is unhandled.** The cached client goes stale and every press then throws into `main.py`'s `try`/`except` forever, with no path back short of restarting the companion app. Not urgent, but it is the known hole in 8.10's design.
 2. **Spotify volume — decide the mechanism before building** (2.6, now re-opened). `pycaw` moves Spotify's share of the Windows mixer; the Web API moves Spotify's own slider. The student wants the second. That makes volume, rather than Like, the feature that would justify the OAuth stack (2.7), so cost both paths together rather than separately. **Nothing to build until this is decided.**
 3. **Repeat, and stop/play/pause** — deprioritised by the student, not dropped. When it comes back: repeat is three-state, needs its own enum import, and needs the `repr()` check from 4.29 before guessing the comparison — guessing has already cost two rounds once. It probably wants a wrapper like shuffle's, since `REPEAT` / `REPEAT:ONE` / `REPEAT:ALL` / `REPEAT:OFF` collapse to one key.
 4. **Two small `main.py` improvements**, both a line each: include the offending `line` and `type(e).__name__` in the `except` message; and (optional) `time.sleep(2)` + `connection.reset_input_buffer()` before the loop to swallow the ESP32 boot chatter instead of parsing it into `cannot find the given category` lines.
