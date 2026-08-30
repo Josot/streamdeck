@@ -33,14 +33,27 @@ def function_record_pause_toggle(client, params=None):
 def function_mute_toggle(client, params=None):
     client.toggle_input_mute(params)
 
+def function_scene_item_visibility_toggle(client, params=None):
+    # Simplified function walkthrough
+    # Which scene is current? --> Which id does param (e.g Webcam) have in current scene? --> do opposite of current state of param (e.g Webcam) so turn on/off
+    # fyi visibility toggle is scene specific
+
+    scene = client.get_current_program_scene().scene_name # grab name of currently showing scene
+    item_id = client.get_scene_item_id(scene, params).scene_item_id # grab id of the param (e.g Webcam) in the current scene
+
+    current_state = client.get_scene_item_enabled(scene, item_id).scene_item_enabled # checks what the current state of the param is
+    client.set_scene_item_enabled(scene, item_id, not current_state) # does the opposite of what the current param state is (like a toggle)
+
+
 # if you add a new OBS function, add it here so the handler can find it.
-# the first part must match the action string coming from serial, read by main.py
+# the first part must match the EXACT action string coming from serial, read by main.py
 OBS_FUNCTIONS = {
     "SCENE": function_set_scene,
     "STREAM": function_stream_toggle,
     "RECORD": function_record_toggle,
     "RECORDPAUSE": function_record_pause_toggle,
     "MUTE": function_mute_toggle,
+    "HIDETOGGLE": function_scene_item_visibility_toggle
 }
 
 def function_handle_obs_functions(action):
