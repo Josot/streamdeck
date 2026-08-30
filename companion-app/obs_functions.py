@@ -44,6 +44,8 @@ def function_scene_item_visibility_toggle(client, params=None):
     current_state = client.get_scene_item_enabled(scene, item_id).scene_item_enabled # checks what the current state of the param is
     client.set_scene_item_enabled(scene, item_id, not current_state) # does the opposite of what the current param state is (like a toggle)
 
+def function_save_replay_buffer(client, params=None):
+    client.save_replay_buffer()
 
 # if you add a new OBS function, add it here so the handler can find it.
 # the first part must match the EXACT action string coming from serial, read by main.py
@@ -53,7 +55,8 @@ OBS_FUNCTIONS = {
     "RECORD": function_record_toggle,
     "RECORDPAUSE": function_record_pause_toggle,
     "MUTE": function_mute_toggle,
-    "HIDETOGGLE": function_scene_item_visibility_toggle
+    "HIDETOGGLE": function_scene_item_visibility_toggle,
+    "CLIP": function_save_replay_buffer
 }
 
 def function_handle_obs_functions(action):
